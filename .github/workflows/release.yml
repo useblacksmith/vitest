@@ -1,0 +1,66 @@
+name: Release
+
+# Builds the plugin and uploads the packed tarball to R2 under
+# vitest-plugin/<version>/. Nothing points at the new version yet: the
+# channel pointers that runners resolve are moved separately, so a
+# release is inert until it is promoted.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm run check:types
+      - run: npm test
+      - name: Pack
+        id: pack
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "${GITHUB_REF_TYPE}" = tag ] && [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match package.json version ${version}" >&2
+            exit 1
+          fi
+          npm pack --pack-destination out   # runs prepack -> npm run build
+          file="out/blacksmith-vitest-${version}.tgz"
+          sha256sum "$file" | cut -d' ' -f1 > "$file.sha256"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+          ls -l out
+      - name: Install s5cmd
+        run: |
+          curl -fL https://github.com/peak/s5cmd/releases/download/v2.2.2/s5cmd_2.2.2_Linux-64bit.tar.gz -o s5cmd.tar.gz
+          tar -xzf s5cmd.tar.gz s5cmd
+          sudo mv s5cmd /usr/local/bin/
+      - name: Upload to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          VERSION: ${{ steps.pack.outputs.version }}
+          FILE: ${{ steps.pack.outputs.file }}
+        run: |
+          dest="s3://${R2_BUCKET_NAME}/vitest-plugin/${VERSION}/"
+          # A version is immutable once published; refuse to overwrite.
+          if s5cmd --endpoint-url="$R2_ENDPOINT" ls "${dest}$(basename "$FILE")" >/dev/null 2>&1; then
+            echo "vitest-plugin ${VERSION} is already published" >&2
+            exit 1
+          fi
+          s5cmd --endpoint-url="$R2_ENDPOINT" cp "$FILE" "$dest"
+          s5cmd --endpoint-url="$R2_ENDPOINT" cp "$FILE.sha256" "$dest"
