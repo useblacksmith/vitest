@@ -61,7 +61,8 @@ jobs:
           # A version is immutable once published; refuse to overwrite. The
           # tarball is the guard and goes last, so a run that died between the
           # two copies left only the checksum behind and can be retried.
-          if s5cmd --endpoint-url="$R2_ENDPOINT" ls "${dest}$(basename "$FILE")" >/dev/null 2>&1; then
+          # (s5cmd ls matches by prefix, so compare the exact object name.)
+          if s5cmd --endpoint-url="$R2_ENDPOINT" ls "$dest" 2>/dev/null | awk '{print $NF}' | grep -qx "$(basename "$FILE")"; then
             echo "vitest-plugin ${VERSION} is already published" >&2
             exit 1
           fi
