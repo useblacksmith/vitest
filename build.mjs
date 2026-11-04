@@ -3,6 +3,7 @@
 import { rmSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
 import { build } from 'esbuild'
 
 rmSync('dist', { recursive: true, force: true })
@@ -20,7 +21,7 @@ await build({
 	packages: 'external',
 })
 
-const tsc = createRequire(import.meta.url).resolve('typescript/bin/tsc')
+const tsc = join(dirname(createRequire(import.meta.url).resolve('typescript/package.json')), 'bin/tsc')
 execFileSync(process.execPath, [tsc, '-p', 'tsconfig.build.json', '--emitDeclarationOnly'], {
 	stdio: 'inherit',
 })
