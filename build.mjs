@@ -2,6 +2,7 @@
 // setup file it points Vitest at), declarations from tsc, no source maps.
 import { rmSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
+import { createRequire } from 'node:module'
 import { build } from 'esbuild'
 
 rmSync('dist', { recursive: true, force: true })
@@ -19,6 +20,7 @@ await build({
 	packages: 'external',
 })
 
-execFileSync('npx', ['tsc', '-p', 'tsconfig.build.json', '--emitDeclarationOnly'], {
+const tsc = createRequire(import.meta.url).resolve('typescript/bin/tsc')
+execFileSync(process.execPath, [tsc, '-p', 'tsconfig.build.json', '--emitDeclarationOnly'], {
 	stdio: 'inherit',
 })
