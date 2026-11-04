@@ -106,19 +106,12 @@ Requires Vitest 5.1 or newer.
 
 ## Development
 
-This package is built and tested on its own, outside the pnpm workspace:
-
 ```sh
-cd extensions/vitest
 npm ci
 npm run check:types
-npm run build          # dist/, committed so the dashboard can depend on this directory
-npm test               # runs test/fixture with a fake backend
+npm run build          # dist/ (not committed; the release tarball ships it)
+npm test               # runs the fixtures under test/ with a fake backend
 ```
-
-`dist/` is checked in because `dashboard/package.json` depends on
-`file:../extensions/vitest`; rebuild and commit it with any `src/` change (CI
-fails on a stale `dist/`).
 
 ## Custom sequencers
 
