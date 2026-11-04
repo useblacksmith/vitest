@@ -191,19 +191,21 @@ export async function anchorTree(
 	}
 	if (files.length === 0) return tree
 	if (fileMode === false) {
-		const staged = await git(repo, [
-			'--literal-pathspecs',
-			'ls-files',
-			'-z',
-			'--stage',
-			'--',
-			...files,
-		])
 		const indexModes = new Map<string, string>()
-		for (const entry of staged.split('\0')) {
-			const tab = entry.indexOf('\t')
-			if (tab === -1) continue
-			indexModes.set(entry.slice(tab + 1), entry.slice(0, 6))
+		for (let i = 0; i < files.length; i += 500) {
+			const staged = await git(repo, [
+				'--literal-pathspecs',
+				'ls-files',
+				'-z',
+				'--stage',
+				'--',
+				...files.slice(i, i + 500),
+			])
+			for (const entry of staged.split('\0')) {
+				const tab = entry.indexOf('\t')
+				if (tab === -1) continue
+				indexModes.set(entry.slice(tab + 1), entry.slice(0, 6))
+			}
 		}
 		files.forEach((file, index) => {
 			modes[index] = indexModes.get(file) ?? '100644'
