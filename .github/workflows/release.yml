@@ -36,6 +36,7 @@ jobs:
             echo "tag ${GITHUB_REF_NAME} does not match package.json version ${version}" >&2
             exit 1
           fi
+          mkdir -p out
           npm pack --pack-destination out   # runs prepack -> npm run build
           file="out/blacksmith-vitest-${version}.tgz"
           sha256sum "$file" | cut -d' ' -f1 > "$file.sha256"
@@ -57,10 +58,12 @@ jobs:
           FILE: ${{ steps.pack.outputs.file }}
         run: |
           dest="s3://${R2_BUCKET_NAME}/vitest-plugin/${VERSION}/"
-          # A version is immutable once published; refuse to overwrite.
+          # A version is immutable once published; refuse to overwrite. The
+          # tarball is the guard and goes last, so a run that died between the
+          # two copies left only the checksum behind and can be retried.
           if s5cmd --endpoint-url="$R2_ENDPOINT" ls "${dest}$(basename "$FILE")" >/dev/null 2>&1; then
             echo "vitest-plugin ${VERSION} is already published" >&2
             exit 1
           fi
-          s5cmd --endpoint-url="$R2_ENDPOINT" cp "$FILE" "$dest"
           s5cmd --endpoint-url="$R2_ENDPOINT" cp "$FILE.sha256" "$dest"
+          s5cmd --endpoint-url="$R2_ENDPOINT" cp "$FILE" "$dest"
