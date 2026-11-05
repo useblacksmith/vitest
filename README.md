@@ -36,7 +36,7 @@ The plugin uses Vitest's dependency tracking: each run records which modules and
 | `shadow` | `false` | Run every test, but log what the affected selection would have run and which failed files it would have skipped. Use it to evaluate the plugin on a repo before relying on the selection. |
 | `disableCache` | `false` | Do not store the dependency record in the Actions cache. |
 | `cachePrefix` | `'blacksmith-vitest'` | First segment of the cache key; change it to discard every existing entry. |
-| `allowCustomShards` | `false` | Keep the affected selection when your config or another plugin sets `test.sequence.sequencer`. By default such a run runs every test and logs why. Only enable it for a sequencer that extends or delegates to the plugin's `HashShardSequencer`. |
+| `allowCustomShards` | `false` | Shards must be stable for maximal efficacy, which the plugin handles by default. Set this to `true` to use a custom sharding strategy (`test.sequence.sequencer`). |
 
 ## Tradeoffs
 
