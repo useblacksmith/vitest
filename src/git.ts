@@ -135,6 +135,15 @@ function under(sorted: string[], dir: string): string[] {
 
 const DIRECTORY_MODE = '040000'
 
+/** A path nothing could read, e.g. a component over NAME_MAX or a NUL byte, is as absent as a missing one. */
+function lstat(file: string): Stats | undefined {
+	try {
+		return lstatSync(file, { throwIfNoEntry: false })
+	} catch {
+		return undefined
+	}
+}
+
 /**
  * What each path looks like now: a file is `<mode> <blob>` as `git ls-tree`
  * prints it, a symlink hashes its target, a directory hashes its listing (every
@@ -163,7 +172,7 @@ export async function anchorTree(
 	if (wanted.length === 0) return tree
 	const present = new Map<string, Stats>()
 	for (const file of wanted) {
-		const stat = lstatSync(path.join(repo, file), { throwIfNoEntry: false })
+		const stat = lstat(path.join(repo, file))
 		if (stat !== undefined) present.set(file, stat)
 	}
 	// Directories apart from files: a directory pathspec walks its contents, a
