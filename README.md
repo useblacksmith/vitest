@@ -38,7 +38,7 @@ The plugin uses Vitest's dependency tracking: each run records which modules and
 | `cachePrefix` | `'blacksmith-vitest'` | First segment of the cache key; change it to discard every existing entry. |
 | `allowCustomShards` | `false` | Shards must be stable for maximal efficacy, which the plugin handles by default. Set this to `true` to use a custom sharding strategy (`test.sequence.sequencer`). |
 
-## Tradeoffs
+## Caveats
 
 - **Only reads made by the test process are tracked.** Imports and `fs` reads from the tests themselves are; reads from a child process, `globalSetup`, or browser-mode projects are not. List such inputs in Vitest's `forceRerunTriggers` so a change to them runs everything.
 
