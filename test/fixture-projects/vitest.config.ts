@@ -1,6 +1,7 @@
 import { defineConfig } from 'vitest/config'
 
-import blacksmith, { BlacksmithReporter } from '../../src/index.ts'
+import blacksmith from '../../src/index.ts'
+import { BlacksmithReporter } from '../../src/reporter.ts'
 
 // The plugin is in the root config and, through `extends`, in both projects;
 // the reporter is opted into once, at the root.

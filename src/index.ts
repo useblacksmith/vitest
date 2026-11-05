@@ -19,8 +19,6 @@ import {
 	stableShards,
 } from './sequencer.js'
 
-export { BlacksmithReporter } from './reporter.js'
-
 /** Beside this module; `.ts` when the plugin runs from source (its own test fixtures). */
 const recordReads = fileURLToPath(
 	new URL(

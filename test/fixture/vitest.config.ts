@@ -1,6 +1,7 @@
 import { defineConfig } from 'vitest/config'
 
-import blacksmith, { BlacksmithReporter } from '../../src/index.ts'
+import blacksmith from '../../src/index.ts'
+import { BlacksmithReporter } from '../../src/reporter.ts'
 
 export default defineConfig({
 	plugins: [blacksmith({ runAllTests: true })],
