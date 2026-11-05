@@ -30,6 +30,8 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
           registry-url: https://registry.npmjs.org
+      # Node 24 bundles npm 11.19, which has no `npm stage`; staged publishing needs ≥ 11.21.
+      - run: npm install -g npm@^11.21.0
       - run: npm ci
       - run: npm run check:types
       - run: npm test
