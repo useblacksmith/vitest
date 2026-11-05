@@ -20,19 +20,6 @@ import {
 } from './sequencer.js'
 
 export { BlacksmithReporter } from './reporter.js'
-export { HashShardSequencer, shardFor } from './sequencer.js'
-export {
-	ShadowAnalysis,
-	type ShadowResult,
-	SNAPSHOT_FILE,
-	type Snapshot,
-} from './affected.js'
-export type {
-	Payload,
-	RunError,
-	TestResultRecord,
-	TestStatus,
-} from './payload.js'
 
 /** Beside this module; `.ts` when the plugin runs from source (its own test fixtures). */
 const recordReads = fileURLToPath(

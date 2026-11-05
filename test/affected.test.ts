@@ -23,7 +23,7 @@ import {
 	test,
 } from 'vitest'
 
-import { SNAPSHOT_FILE, type Snapshot } from '../src/index.ts'
+import { SNAPSHOT_FILE, type Snapshot } from '../src/affected.ts'
 import { BloomFilter } from '../src/bloom.ts'
 import { shardFor } from '../src/sequencer.ts'
 import { packageRoot } from './harness.ts'
