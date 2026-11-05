@@ -22,14 +22,14 @@ export default defineConfig({
 
 In CI the plugin runs only the test files affected since the last green run. `--shard=i/n` works as usual; the plugin assigns files to shards itself so each shard's cache stays stable.
 
-Requires Vitest 5.1 or newer. On an older Vitest the plugin logs once and every test runs.
+Requires Vitest 5.1 or newer.
 
 ## Options
 
 | option | default | effect |
 |---|---|---|
-| `allTests` | `true` | Run every test. Set to `false` where you want the affected selection (CI). |
-| `shadow` | `false` | Run every test, but log what the affected selection would have run and which failed files it would have skipped. Use it to evaluate the plugin on a repo before switching `allTests` off. |
+| `allTests` | `false` | Run every test instead of the affected selection (`allTests: !process.env.CI`, say). |
+| `shadow` | `false` | Run every test, but log what the affected selection would have run and which failed files it would have skipped. Use it to evaluate the plugin on a repo before relying on the selection. |
 | `disableCache` | `false` | Do not store the dependency record in the Actions cache. |
 | `cachePrefix` | `'blacksmith-vitest'` | First segment of the cache key; change it to discard every existing entry. |
 | `allowCustomShards` | `false` | Keep the affected selection when your config or another plugin sets `test.sequence.sequencer`. By default such a run runs every test and logs why. Only enable it for a sequencer that extends or delegates to the plugin's `HashShardSequencer`. |

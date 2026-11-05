@@ -9,7 +9,8 @@ class ContiguousSequencer extends BaseSequencer {}
 export default defineConfig({
 	plugins: [
 		blacksmith({
-			allTests: process.env.BLACKSMITH_CHANGED !== '1',
+			// The default (affected selection) is what BLACKSMITH_CHANGED=1 exercises.
+			...(process.env.BLACKSMITH_CHANGED === '1' ? {} : { allTests: true }),
 			shadow: process.env.BLACKSMITH_SHADOW === '1',
 			allowCustomShards: process.env.BLACKSMITH_ALLOW_CUSTOM_SHARDS === '1',
 			disableCache: process.env.BLACKSMITH_DISABLE_CACHE === '1',

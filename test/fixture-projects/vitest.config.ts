@@ -5,7 +5,7 @@ import blacksmith, { BlacksmithReporter } from '../../src/index.ts'
 // The plugin is in the root config and, through `extends`, in both projects;
 // the reporter is opted into once, at the root.
 export default defineConfig({
-	plugins: [blacksmith()],
+	plugins: [blacksmith({ allTests: true })],
 	test: {
 		reporters: ['default', new BlacksmithReporter()],
 		projects: [

@@ -37,12 +37,11 @@ const recordReads = fileURLToPath(
 
 export interface BlacksmithOptions {
 	/**
-	 * Run every test instead of only those affected since the last green run
-	 * (`allTests: !process.env.CI`, say). When false, the plugin turns
-	 * `--changed` on itself, provided the running Vitest routes it through the
-	 * plugin's VCS provider and records dependencies; otherwise it warns once
-	 * and every test runs, so an older Vitest never skips tests on a stale
-	 * record. Defaults to true.
+	 * Run every test instead of only those affected since the last green run.
+	 * By default (false) the plugin turns `--changed` on itself, provided the
+	 * running Vitest routes it through the plugin's VCS provider and records
+	 * dependencies; otherwise it warns once and every test runs, so an older
+	 * Vitest never skips tests on a stale record.
 	 */
 	allTests?: boolean
 	/** Leave the dependency record out of the Actions cache; it is kept there by default where a step can reach the cache service. */
@@ -136,7 +135,7 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 			}
 			if (
 				!options.shadow &&
-				options.allTests === false &&
+				!options.allTests &&
 				!vitest.config.changed &&
 				!changedApplied
 			) {
