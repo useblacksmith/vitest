@@ -1,7 +1,8 @@
 name: Release
 
-# Publishes the package to npm when a v<version> tag is pushed. The tag must
-# match package.json, and a version that is already on the registry is never
+# Stages the package on npm when a v<version> tag is pushed; a maintainer then
+# reviews and releases it with `npm stage approve <id>` (2FA), see README. The
+# tag must match package.json, and a version already on the registry is never
 # republished. Uses npm trusted publishing (OIDC), so no token is stored; the
 # package's trusted publisher must point at this repo and workflow file.
 on:
@@ -44,4 +45,4 @@ jobs:
             echo "${name}@${version} is already published" >&2
             exit 1
           fi
-      - run: npm publish --provenance --access public   # prepack runs the build
+      - run: npm stage publish --provenance --access public   # prepack runs the build
