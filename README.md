@@ -24,6 +24,23 @@ With the plugin, vitest only runs tests impacted by changes since the last succe
 
 Requires Vitest 5.1 or newer.
 
+### Vite+
+
+Vite+ runs Vitest under `vp test`, so the plugin is loaded from the shared `vite.config.ts`:
+
+```ts
+// vite.config.ts
+import 'vite-plus/test/config'
+import { defineConfig } from 'vite-plus'
+import blacksmith from '@useblacksmith/vitest'
+
+export default defineConfig({
+	plugins: [blacksmith()],
+})
+```
+
+`vp test run` then runs the affected selection, including with `--shard`, test file filters, and `--config <path> --dir .` from a workspace package. Requires `vite-plus` 1.5.0 or newer, the first release that ships Vitest 5.1.
+
 ## Running locally
 
 The same selection applies locally: a run reruns what changed on disk since the last successful run, committed or not. To run every test locally and select only in CI:
