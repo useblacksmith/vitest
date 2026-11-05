@@ -217,7 +217,7 @@ describe('--changed against the tree snapshot', () => {
 		}
 	})
 
-	test('the default allTests (false) turns --changed on from the config', async () => {
+	test('the default runAllTests (false) turns --changed on from the config', async () => {
 		repo.env = { BLACKSMITH_CHANGED: '1' }
 		try {
 			expect((await repo.run()).ran).toEqual([])

@@ -10,7 +10,7 @@ export default defineConfig({
 	plugins: [
 		blacksmith({
 			// The default (affected selection) is what BLACKSMITH_CHANGED=1 exercises.
-			...(process.env.BLACKSMITH_CHANGED === '1' ? {} : { allTests: true }),
+			...(process.env.BLACKSMITH_CHANGED === '1' ? {} : { runAllTests: true }),
 			shadow: process.env.BLACKSMITH_SHADOW === '1',
 			allowCustomShards: process.env.BLACKSMITH_ALLOW_CUSTOM_SHARDS === '1',
 			disableCache: process.env.BLACKSMITH_DISABLE_CACHE === '1',

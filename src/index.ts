@@ -46,7 +46,7 @@ export interface BlacksmithOptions {
 	 * dependencies; otherwise it warns once and every test runs, so an older
 	 * Vitest never skips tests on a stale record.
 	 */
-	allTests?: boolean
+	runAllTests?: boolean
 	/** Leave the dependency record out of the Actions cache; it is kept there by default where a step can reach the cache service. */
 	disableCache?: boolean
 	/**
@@ -150,7 +150,7 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 			}
 			if (
 				!options.shadow &&
-				!options.allTests &&
+				!options.runAllTests &&
 				!vitest.config.changed &&
 				!changedApplied
 			) {
