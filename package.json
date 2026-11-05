@@ -7,7 +7,6 @@
 		"type": "git",
 		"url": "git+https://github.com/useblacksmith/vitest.git"
 	},
-	"license": "MIT",
 	"exports": {
 		".": {
 			"types": "./dist/index.d.ts",
