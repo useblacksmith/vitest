@@ -4,8 +4,10 @@ Speed up vitest execution by only running tests impacted by a change, with autom
 
 ## Usage
 
+The plugin ships as a tarball (`blacksmith-vitest-<version>.tgz`), not on the npm registry:
+
 ```sh
-npm install --save-dev @blacksmith/vitest
+npm install --save-dev ./blacksmith-vitest-0.2.0.tgz
 ```
 
 ```ts
@@ -14,11 +16,11 @@ import { defineConfig } from 'vitest/config'
 import blacksmith from '@blacksmith/vitest'
 
 export default defineConfig({
-	plugins: [blacksmith({ allTests: !process.env.CI })],
+	plugins: [blacksmith()],
 })
 ```
 
-That is the whole setup: in CI the plugin runs only the test files affected since the last green run, and locally every test runs. No `--changed` flag and no `actions/cache` steps are needed. `--shard=i/n` works as usual; the plugin assigns files to shards itself so each shard's cache stays stable.
+In CI the plugin runs only the test files affected since the last green run. `--shard=i/n` works as usual; the plugin assigns files to shards itself so each shard's cache stays stable.
 
 Requires Vitest 5.1 or newer. On an older Vitest the plugin logs once and every test runs.
 
