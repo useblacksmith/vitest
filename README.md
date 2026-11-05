@@ -6,6 +6,10 @@ Speed up vitest execution by only running tests impacted by a change, with autom
 
 ## Usage
 
+```sh
+npm install --save-dev @useblacksmith/vitest
+```
+
 ```ts
 // vitest.config.ts
 import { defineConfig } from 'vitest/config'
@@ -50,6 +54,6 @@ The plugin uses Vitest's dependency tracking: each run records which modules and
 ```sh
 npm ci
 npm run check:types
-npm run build          # dist/ (not committed; the release tarball ships it)
+npm run build          # dist/ (not committed; built on publish)
 npm test               # runs the fixtures under test/ with a fake backend
 ```

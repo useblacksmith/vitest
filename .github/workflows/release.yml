@@ -1,0 +1,47 @@
+name: Release
+
+# Publishes the package to npm when a v<version> tag is pushed. The tag must
+# match package.json, and a version that is already on the registry is never
+# republished. Uses npm trusted publishing (OIDC), so no token is stored; the
+# package's trusted publisher must point at this repo and workflow file.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    # GitHub-hosted on purpose: npm generates provenance attestations only on
+    # GitHub-hosted runners (RUNNER_ENVIRONMENT=github-hosted) and refuses
+    # otherwise. CI (ci.yml) stays on Blacksmith.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm run check:types
+      - run: npm test
+      - name: Check the tag against package.json and the registry
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match package.json version ${version}" >&2
+            exit 1
+          fi
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "${name}@${version} is already published" >&2
+            exit 1
+          fi
+      - run: npm publish --provenance --access public   # prepack runs the build
