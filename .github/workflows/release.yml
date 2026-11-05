@@ -1,20 +1,20 @@
 name: Release
 
-# Builds the plugin and uploads the packed tarball to R2 under
-# vitest-plugin/<version>/. Nothing points at the new version yet: the
-# channel pointers that runners resolve are moved separately, so a
-# release is inert until it is promoted.
+# Publishes the package to npm when a v<version> tag is pushed. The tag must
+# match package.json, and a version that is already on the registry is never
+# republished. Uses npm trusted publishing (OIDC), so no token is stored; the
+# package's trusted publisher must point at this repo and workflow file.
 on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
-  release:
+  publish:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v6
@@ -25,46 +25,20 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: package-lock.json
+          registry-url: https://registry.npmjs.org
       - run: npm ci
       - run: npm run check:types
       - run: npm test
-      - name: Pack
-        id: pack
+      - name: Check the tag against package.json and the registry
         run: |
+          name=$(node -p "require('./package.json').name")
           version=$(node -p "require('./package.json').version")
-          if [ "${GITHUB_REF_TYPE}" = tag ] && [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
             echo "tag ${GITHUB_REF_NAME} does not match package.json version ${version}" >&2
             exit 1
           fi
-          mkdir -p out
-          npm pack --pack-destination out   # runs prepack -> npm run build
-          file="out/blacksmith-vitest-${version}.tgz"
-          sha256sum "$file" | cut -d' ' -f1 > "$file.sha256"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "file=$file" >> "$GITHUB_OUTPUT"
-          ls -l out
-      - name: Install s5cmd
-        run: |
-          curl -fL https://github.com/peak/s5cmd/releases/download/v2.2.2/s5cmd_2.2.2_Linux-64bit.tar.gz -o s5cmd.tar.gz
-          tar -xzf s5cmd.tar.gz s5cmd
-          sudo mv s5cmd /usr/local/bin/
-      - name: Upload to R2
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-          VERSION: ${{ steps.pack.outputs.version }}
-          FILE: ${{ steps.pack.outputs.file }}
-        run: |
-          dest="s3://${R2_BUCKET_NAME}/vitest-plugin/${VERSION}/"
-          # A version is immutable once published; refuse to overwrite. The
-          # tarball is the guard and goes last, so a run that died between the
-          # two copies left only the checksum behind and can be retried.
-          # (s5cmd ls matches by prefix, so compare the exact object name.)
-          if s5cmd --endpoint-url="$R2_ENDPOINT" ls "$dest" 2>/dev/null | awk '{print $NF}' | grep -qx "$(basename "$FILE")"; then
-            echo "vitest-plugin ${VERSION} is already published" >&2
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "${name}@${version} is already published" >&2
             exit 1
           fi
-          s5cmd --endpoint-url="$R2_ENDPOINT" cp "$FILE.sha256" "$dest"
-          s5cmd --endpoint-url="$R2_ENDPOINT" cp "$FILE" "$dest"
+      - run: npm publish --provenance --access public   # prepack runs the build
