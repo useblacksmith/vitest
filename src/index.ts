@@ -47,30 +47,15 @@ export interface BlacksmithOptions {
 	 * Vitest never skips tests on a stale record.
 	 */
 	runAllTests?: boolean
-	/** Leave the dependency record out of the Actions cache; it is kept there by default where a step can reach the cache service. */
-	disableCache?: boolean
-	/**
-	 * First segment of the cache key (`<cachePrefix>-v<version>-<projects>-<shard>-<sha>`),
-	 * `blacksmith-vitest` by default. Change it to start over from empty entries.
-	 */
-	cachePrefix?: string
 	/**
 	 * Run every test and only *report* what the affected selection would have
 	 * run: vitest records dependencies but gets no `--changed` and no VCS
 	 * provider, the shard's cached record is fetched into a temporary directory
 	 * (vitest's `cacheDir` is left alone) and, when the run ends, the plugin
 	 * logs how many of the files that ran it would have selected and which
-	 * failed files it would have skipped. A green run still saves the record.
+	 * failing test files it would have skipped. A green run still saves the record.
 	 */
 	shadow?: boolean
-	/**
-	 * Keep selecting tests when `test.sequence.sequencer` is not Blacksmith's
-	 * (the config or a later plugin replaced it). By default such a run treats
-	 * every test as changed, since the dependency record is only valid for the
-	 * shard membership `HashShardSequencer` computes; set this when the custom
-	 * sequencer keeps that membership (extends or delegates to it).
-	 */
-	allowCustomShards?: boolean
 	/**
 	 * Dependencies the tracking cannot see (files a test reads through a child
 	 * process, in `globalSetup`, or outside node): globs of test files mapped
@@ -85,8 +70,7 @@ export interface BlacksmithOptions {
 function supportsChanged(vitest: Vitest): boolean {
 	const { vcs } = vitest as { vcs?: { findChangedFiles?: unknown } }
 	const experimental = vitest.config.experimental as
-		| { recordDependencies?: boolean; vcsProvider?: unknown }
-		| undefined
+		{ recordDependencies?: boolean; vcsProvider?: unknown } | undefined
 	return (
 		typeof vcs?.findChangedFiles === 'function' &&
 		experimental?.recordDependencies === true &&
@@ -104,8 +88,8 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 		name: 'blacksmith',
 		config(userConfig) {
 			// Vite merges this over the user's config, so a sequencer the config
-			// names is left in place (and detected in configureVitest) rather than
-			// silently replaced.
+			// names is left in place rather than silently replaced; a test that
+			// moves shards under it is outside its new shard's record and reruns.
 			const theirs = customSequencer(
 				(userConfig as { test?: { sequence?: { sequencer?: unknown } } }).test
 					?.sequence?.sequencer,
@@ -126,9 +110,6 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 			const active = configuredProvider(vitest) ?? provider
 			active.vitest = vitest
 			active.dependencies = provider.dependencies
-			active.customSequencer = options.allowCustomShards
-				? null
-				: customSequencer(vitest.config.sequence.sequencer)
 			if (options.shadow) {
 				if (vitest.config.changed) {
 					vitest.logger.warn(
@@ -136,16 +117,9 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 					)
 					vitest.config.changed = false
 				}
-				shadow ??= new ShadowAnalysis(vitest, {
-					cache: !options.disableCache,
-					cachePrefix: options.cachePrefix,
-					customSequencer: active.customSequencer,
-					dependencies: active.dependencies,
-				})
+				shadow ??= new ShadowAnalysis(vitest, active.dependencies)
 			} else {
-				restored ??= options.disableCache
-					? Promise.resolve()
-					: restoreDependencyCache(vitest, options.cachePrefix)
+				restored ??= restoreDependencyCache(vitest)
 				await restored
 			}
 			if (
@@ -176,13 +150,7 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 			}
 			const reporters = vitest.config.reporters
 			if (!reporters.some(isSnapshotRecorder)) {
-				reporters.push(
-					new SnapshotRecorder(active, {
-						cache: !options.disableCache,
-						cachePrefix: options.cachePrefix,
-						shadow,
-					}),
-				)
+				reporters.push(new SnapshotRecorder(active, { shadow }))
 			}
 		},
 	}

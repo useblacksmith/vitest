@@ -31,7 +31,6 @@ export interface CacheKey {
 export const DEFAULT_CACHE_PREFIX = 'blacksmith-vitest'
 
 export function cacheKey(input: {
-	cachePrefix?: string | undefined
 	snapshotVersion: number
 	projects: string[]
 	shard: { index: number; count: number } | null
@@ -47,7 +46,7 @@ export function cacheKey(input: {
 			: 'all',
 		input.shard ? `${input.shard.index}of${input.shard.count}` : '1of1',
 	].join('-')
-	const prefix = `${input.cachePrefix ?? DEFAULT_CACHE_PREFIX}-${scope}-`
+	const prefix = `${DEFAULT_CACHE_PREFIX}-${scope}-`
 	return { key: `${prefix}${input.head}`, prefix }
 }
 
@@ -65,7 +64,7 @@ async function twirp<T>(
 		method: 'POST',
 		headers: {
 			'content-type': 'application/json',
-			'user-agent': '@blacksmith/vitest',
+			'user-agent': '@useblacksmith/vitest',
 		},
 		body: JSON.stringify(body),
 		signal: AbortSignal.timeout(TIMEOUT_MS),
@@ -133,8 +132,7 @@ export async function restoreBundle(
 }
 
 export type SaveOutcome =
-	| { saved: true; bytes: number }
-	| { saved: false; reason: string }
+	{ saved: true; bytes: number } | { saved: false; reason: string }
 
 /** Uploads the record and anchors under the exact `key`; an existing entry for that key is left alone. */
 export async function saveBundle(

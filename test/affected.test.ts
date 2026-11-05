@@ -24,6 +24,7 @@ import {
 } from 'vitest'
 
 import { SNAPSHOT_FILE, type Snapshot } from '../src/index.ts'
+import { BloomFilter } from '../src/bloom.ts'
 import { shardFor } from '../src/sequencer.ts'
 import { packageRoot } from './harness.ts'
 
@@ -79,7 +80,7 @@ class Repo {
 	}
 
 	/** The snapshot file for the full run, or the one whose name carries `key` for a `--project` run. */
-	snapshot(key = ''): Snapshot | null {
+	private snapshotFile(key = ''): string | null {
 		const cacheDir = path.join(this.dir, 'node_modules', '.vite', 'vitest')
 		if (!existsSync(cacheDir)) return null
 		const files = readdirSync(cacheDir, {
@@ -92,9 +93,23 @@ class Repo {
 					readFileSync(path.join(cacheDir, file), 'utf8').includes(key),
 		)
 		if (files.length !== 1) return null
-		return JSON.parse(
-			readFileSync(path.join(cacheDir, files[0] ?? ''), 'utf8'),
-		) as Snapshot
+		return path.join(cacheDir, files[0] ?? '')
+	}
+
+	snapshot(key = ''): Snapshot | null {
+		const file = this.snapshotFile(key)
+		return file ? (JSON.parse(readFileSync(file, 'utf8')) as Snapshot) : null
+	}
+
+	/** Overwrites fields of the stored snapshot, standing in for a snapshot another run produced. */
+	patchSnapshot(patch: Record<string, unknown>): void {
+		const file = this.snapshotFile()
+		if (!file) throw new Error('no snapshot to patch')
+		const stored = JSON.parse(readFileSync(file, 'utf8')) as Record<
+			string,
+			unknown
+		>
+		writeFileSync(file, JSON.stringify({ ...stored, ...patch }))
 	}
 
 	env: Record<string, string> = {}
@@ -157,7 +172,7 @@ describe('--changed against the tree snapshot', () => {
 		expect(first.exitCode, first.output).toBe(0)
 		expect(first.ran).toEqual([...TESTS].sort())
 		expect(repo.snapshot()).toMatchObject({
-			version: 3,
+			version: 4,
 			head: repo.git('rev-parse', 'HEAD').trim(),
 			shard: null,
 			tree: { 'src/lib/a.ts': expect.any(String) },
@@ -417,6 +432,20 @@ describe('sharding', () => {
 			owned(1, 2).filter((name) => ['one', 'two'].includes(name)),
 		)
 	})
+
+	test('a test the snapshot does not vouch for reruns even with its dependencies unchanged', async () => {
+		await repo.run('--shard=1/2')
+		expect(repo.snapshot()?.tests).toMatchObject({ m: expect.any(Number) })
+		const [moved, ...rest] = owned(1, 2)
+		repo.patchSnapshot({
+			tests: BloomFilter.from(rest.map((name) => `src/${name}.test.ts`)),
+		})
+		const run = await repo.run('--changed', '--shard=1/2')
+		expect(run.output).toContain('0 files changed')
+		expect(run.output).toContain('1 test files not covered by it')
+		expect(run.ran).toEqual([moved])
+		expect((await repo.run('--changed', '--shard=1/2')).ran).toEqual([])
+	})
 })
 
 describe('snapshot is only written by runs that cover the shard', () => {
@@ -657,7 +686,7 @@ describe('the dependency record travels through the Actions cache', () => {
 		const first = await producer.run()
 		expect(first.exitCode, first.output).toBe(0)
 		expect(first.output).toContain(
-			'saved dependency cache blacksmith-vitest-v3-all-1of1-',
+			'saved dependency cache blacksmith-vitest-v4-all-1of1-',
 		)
 		expect([...cache.entries.values()].filter((e) => e.final)).toHaveLength(1)
 
@@ -666,7 +695,7 @@ describe('the dependency record travels through the Actions cache', () => {
 		const restored = await consumer.run('--changed')
 		expect(restored.exitCode, restored.output).toBe(0)
 		expect(restored.output).toContain(
-			'restored dependency cache blacksmith-vitest-v3-all-1of1-',
+			'restored dependency cache blacksmith-vitest-v4-all-1of1-',
 		)
 		expect(restored.ran).toEqual([])
 
@@ -693,7 +722,7 @@ describe('the dependency record travels through the Actions cache', () => {
 		expect(clean.exitCode, clean.output).toBe(0)
 		expect(clean.ran).toEqual([...TESTS].sort())
 		expect(clean.output).toMatch(
-			/shadow: would have run 0 of \d+ test files \(0 files changed since [0-9a-f]{12}, from blacksmith-vitest-v3-all-1of1-/,
+			/shadow: would have run 0 of \d+ test files \(0 files changed since [0-9a-f]{12}, from blacksmith-vitest-v4-all-1of1-/,
 		)
 		expect(clean.output).not.toContain('restored dependency cache')
 		expect(clean.output).toContain('saved dependency cache')
@@ -741,7 +770,7 @@ describe('the dependency record travels through the Actions cache', () => {
 		)
 	})
 
-	test('a sequencer that is not ours makes every test count as changed unless allowCustomShards is set', async () => {
+	test('a custom sequencer is kept and the selection still applies', async () => {
 		const producer = new Repo('custom-sequencer-producer')
 		producer.env = { ACTIONS_RESULTS_URL: cache.url }
 		expect((await producer.run()).output).toContain('saved dependency cache')
@@ -751,29 +780,10 @@ describe('the dependency record travels through the Actions cache', () => {
 			ACTIONS_RESULTS_URL: cache.url,
 			BLACKSMITH_CUSTOM_SEQUENCER: '1',
 		}
-		const refused = await repo.run('--changed')
-		expect(refused.exitCode, refused.output).toBe(0)
-		expect(refused.output).toContain(
-			"sharding is ContiguousSequencer, not Blacksmith's; running every test",
-		)
-		expect(refused.ran).toEqual([...TESTS].sort())
-
-		const shadow = new Repo('custom-sequencer-shadow')
-		shadow.env = {
-			ACTIONS_RESULTS_URL: cache.url,
-			BLACKSMITH_CUSTOM_SEQUENCER: '1',
-			BLACKSMITH_SHADOW: '1',
-		}
-		const shadowed = await shadow.run()
-		expect(shadowed.output).toMatch(
-			/shadow: would have run (\d+) of \1 test files \(everything: sharding is ContiguousSequencer/,
-		)
-
-		repo.env = { ...repo.env, BLACKSMITH_ALLOW_CUSTOM_SHARDS: '1' }
-		const allowed = await repo.run('--changed')
-		expect(allowed.exitCode, allowed.output).toBe(0)
-		expect(allowed.output).not.toContain('not Blacksmith')
-		expect(allowed.ran).toEqual([])
+		const run = await repo.run('--changed')
+		expect(run.exitCode, run.output).toBe(0)
+		expect(run.output).toContain('restored dependency cache')
+		expect(run.ran).toEqual([])
 	})
 
 	test('a custom cacheDir is where the record is restored to and saved from', async () => {
@@ -860,48 +870,6 @@ describe('the dependency record travels through the Actions cache', () => {
 		expect(run.output).toContain('hides ACTIONS_RESULTS_URL in strict env mode')
 	})
 
-	test('cachePrefix starts the key, so a new prefix starts from empty entries', async () => {
-		const producer = new Repo('cache-prefix-producer')
-		producer.env = { ACTIONS_RESULTS_URL: cache.url }
-		const first = await producer.run()
-		expect(first.exitCode, first.output).toBe(0)
-		expect(first.output).toContain(
-			'saved dependency cache blacksmith-vitest-v3-all-1of1-',
-		)
-
-		const rotated = new Repo('cache-prefix-rotated')
-		rotated.env = {
-			ACTIONS_RESULTS_URL: cache.url,
-			BLACKSMITH_CACHE_PREFIX: 'rotated',
-		}
-		const miss = await rotated.run()
-		expect(miss.exitCode, miss.output).toBe(0)
-		expect(miss.output).toContain(
-			'no dependency cache: no entry under rotated-v3-all-1of1-',
-		)
-		expect(miss.output).toContain('saved dependency cache rotated-v3-all-1of1-')
-
-		const again = new Repo('cache-prefix-again')
-		again.env = {
-			ACTIONS_RESULTS_URL: cache.url,
-			BLACKSMITH_CACHE_PREFIX: 'rotated',
-		}
-		const hit = await again.run('--changed')
-		expect(hit.exitCode, hit.output).toBe(0)
-		expect(hit.output).toContain(
-			'restored dependency cache rotated-v3-all-1of1-',
-		)
-		expect(hit.ran).toEqual([])
-	})
-
-	test('disableCache: true never talks to the cache service', async () => {
-		const repo = new Repo('cache-disabled')
-		repo.env = { ACTIONS_RESULTS_URL: cache.url, BLACKSMITH_DISABLE_CACHE: '1' }
-		const run = await repo.run()
-		expect(run.exitCode, run.output).toBe(0)
-		expect(run.output).not.toContain('dependency cache')
-	})
-
 	test('no cache service, no traffic: the run is unchanged', async () => {
 		const repo = new Repo('cache-none')
 		const run = await repo.run()
@@ -917,7 +885,7 @@ describe('a project with its own root', () => {
 		repo.env = { BLACKSMITH_ROOTED_PROJECT: '1', BLACKSMITH_CHANGED: '1' }
 	})
 
-	test('selects from the provider vitest loaded, not the re-evaluated config\'s copy', async () => {
+	test("selects from the provider vitest loaded, not the re-evaluated config's copy", async () => {
 		const first = await repo.run()
 		expect(first.exitCode, first.output).toBe(0)
 		expect(first.ran).toEqual(['five', 'one'])

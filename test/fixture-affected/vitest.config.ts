@@ -12,13 +12,8 @@ export default defineConfig({
 			// The default (affected selection) is what BLACKSMITH_CHANGED=1 exercises.
 			...(process.env.BLACKSMITH_CHANGED === '1' ? {} : { runAllTests: true }),
 			shadow: process.env.BLACKSMITH_SHADOW === '1',
-			allowCustomShards: process.env.BLACKSMITH_ALLOW_CUSTOM_SHARDS === '1',
-			disableCache: process.env.BLACKSMITH_DISABLE_CACHE === '1',
 			// mapped.test.ts reads nothing; only this rule ties it to mapped/.
 			dependencies: { 'src/mapped.test.ts': 'mapped/**' },
-			...(process.env.BLACKSMITH_CACHE_PREFIX
-				? { cachePrefix: process.env.BLACKSMITH_CACHE_PREFIX }
-				: {}),
 		}),
 	],
 	// Vite's cacheDir; Vitest keeps its records under <cacheDir>/vitest.

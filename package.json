@@ -1,5 +1,5 @@
 {
-	"name": "@blacksmith/vitest",
+	"name": "@useblacksmith/vitest",
 	"version": "0.2.0",
 	"description": "Reports Vitest test results to Blacksmith and runs only the tests affected since the last run",
 	"type": "module",

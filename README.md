@@ -1,19 +1,21 @@
-# @blacksmith/vitest
+# @useblacksmith/vitest
 
 Speed up vitest execution by only running tests impacted by a change, with automatic caching when run on Blacksmith.
 
+> **Alpha.** The plugin is under active development; options and the cache format may change between releases.
+
 ## Usage
 
-The plugin ships as a tarball (`blacksmith-vitest-<version>.tgz`), not on the npm registry:
+The plugin ships as a tarball (`useblacksmith-vitest-<version>.tgz`), not on the npm registry:
 
 ```sh
-npm install --save-dev ./blacksmith-vitest-0.2.0.tgz
+npm install --save-dev ./useblacksmith-vitest-0.2.0.tgz
 ```
 
 ```ts
 // vitest.config.ts
 import { defineConfig } from 'vitest/config'
-import blacksmith from '@blacksmith/vitest'
+import blacksmith from '@useblacksmith/vitest'
 
 export default defineConfig({
 	plugins: [blacksmith()],
@@ -34,22 +36,20 @@ plugins: [blacksmith({ runAllTests: !process.env.CI })],
 
 ## How it works
 
-The plugin uses Vitest's dependency tracking: each run records which modules and files every test depends on, and the next run compares the checkout against that record to calculate the impacted test set. The record is stored in the Actions cache when run on Blacksmith, so runs on different runners pick up where the last successful run left off.
+The plugin uses Vitest's dependency tracking: each run records which modules and files every test depends on, and the next run compares the checkout against that record to calculate the impacted test set; a test the last successful run did not cover always runs. The record is stored in the Actions cache when run on Blacksmith, so runs on different runners pick up where the last successful run left off.
 
 ## Options
 
 | option | default | effect |
 |---|---|---|
 | `runAllTests` | `false` | Run every test instead of the affected selection. |
-| `shadow` | `false` | Run every test, but log what the affected selection would have run and which failed files it would have skipped. Use it to evaluate the plugin on a repo before relying on the selection. |
-| `disableCache` | `false` | Do not store the dependency record in the Actions cache. |
-| `cachePrefix` | `'blacksmith-vitest'` | First segment of the cache key; change it to discard every existing entry. |
+| `shadow` | `false` | Run every test, but log what the affected selection would have run and which failing test files it would have skipped, i.e. failures the selection would have missed. Use it to evaluate the plugin on a repo before relying on the selection. |
 | `dependencies` | `{}` | Dependencies the tracking cannot see, as globs of test files mapped to the glob(s) of the files they depend on, relative to the config root: `{ 'tests/**/*.spec.ts': 'fixtures/**' }`. A change to a matching file reruns the mapped tests. |
-| `allowCustomShards` | `false` | Shards must be stable for maximal efficacy, which the plugin handles by default. Set this to `true` to use a custom sharding strategy (`test.sequence.sequencer`). |
 
 ## Caveats
 
 - **Only dependencies in the test process are tracked.** `import`, `require`, and `fs` are automatically tracked. Files read from a child process, `globalSetup`, or outside of node are not; declare them with the `dependencies` option.
+- **Shards must be stable for maximal efficacy.** The plugin assigns test files to shards by a hash of their path, so a file stays in its shard as others are added or removed. A custom `test.sequence.sequencer` is honoured, but every test that moves to another shard reruns there.
 
 ## Development
 

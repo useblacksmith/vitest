@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import picomatch from 'picomatch'
 
+import { BloomFilter } from './bloom.js'
 import { cacheKey, ENV_CACHE_URL, restoreBundle, saveBundle } from './cache.js'
 
 import type {
@@ -29,9 +30,9 @@ import {
 import { inShard } from './sequencer.js'
 
 export const SNAPSHOT_FILE = 'blacksmith.json'
-// Bumped whenever the records an anchor vouches for gain a kind of dependency,
-// so an older anchor is not trusted.
-const SNAPSHOT_VERSION = 3
+// Bumped whenever the snapshot's shape changes or the records an anchor
+// vouches for gain a kind of dependency, so an older snapshot is not trusted.
+const SNAPSHOT_VERSION = 4
 
 /** A `dependencies` entry, compiled: test files matching `tests` depend on files matching `deps`; both root-relative. */
 export interface DependencyRule {
@@ -40,7 +41,8 @@ export interface DependencyRule {
 }
 
 export function compileDependencies(
-	dependencies: Readonly<Record<string, string | readonly string[]>> | undefined,
+	dependencies:
+		Readonly<Record<string, string | readonly string[]>> | undefined,
 ): DependencyRule[] {
 	return Object.entries(dependencies ?? {}).map(([tests, deps]) => ({
 		tests: picomatch(tests, { dot: true }),
@@ -51,6 +53,11 @@ export function compileDependencies(
 /** `file` relative to the config root with `/` separators, the form the `dependencies` globs match. */
 function rootRelative(root: string, file: string): string {
 	return path.relative(root, file).split(path.sep).join('/')
+}
+
+/** `file` relative to the repository with `/` separators (git's form, whatever path.sep is); `tree` and `tests` are keyed by it. */
+function repoRelative(repo: string, file: string): string {
+	return path.relative(repo, file).split(path.sep).join('/')
 }
 
 export interface Shard {
@@ -69,6 +76,8 @@ export interface Snapshot {
 	/** Names of the projects the run covered (`--project` narrows them). */
 	projects: string[]
 	tree: Tree
+	/** Repo-relative test files the run covered: ran, or deselected by our provider as unchanged. A test outside this set reruns whatever its record says. */
+	tests: BloomFilter
 }
 
 const LOCKFILES = new Set([
@@ -166,9 +175,6 @@ async function anchoredPaths(
 	dir: string,
 	rules: readonly DependencyRule[],
 ): Promise<string[]> {
-	// git prints and matches `/`-separated paths, whatever path.sep is.
-	const relative = (file: string) =>
-		path.relative(repo, file).split(path.sep).join('/')
 	const paths = new Set(await lockfilePaths(repo, LOCKFILES))
 	if (rules.length > 0) {
 		for (const file of await knownPaths(repo)) {
@@ -181,10 +187,10 @@ async function anchoredPaths(
 		// Vitest records every project's paths relative to the root config's root.
 		const root = vitest.config.root
 		for (const module of project.modules) {
-			paths.add(relative(path.resolve(root, module)))
+			paths.add(repoRelative(repo, path.resolve(root, module)))
 		}
 		for (const test of Object.keys(project.files)) {
-			paths.add(relative(path.resolve(root, test)))
+			paths.add(repoRelative(repo, path.resolve(root, test)))
 		}
 	}
 	return [...paths]
@@ -223,17 +229,19 @@ async function readSnapshot(file: string): Promise<Snapshot | null> {
 		return null
 	}
 	if (typeof parsed !== 'object' || parsed === null) return null
-	const { version, head, shard, projects, tree } = parsed as Record<
+	const { version, head, shard, projects, tree, tests } = parsed as Record<
 		string,
 		unknown
 	>
+	const covered = BloomFilter.parse(tests)
 	if (
 		version !== SNAPSHOT_VERSION ||
 		typeof head !== 'string' ||
 		!isShard(shard) ||
 		!Array.isArray(projects) ||
 		!projects.every((name) => typeof name === 'string') ||
-		!isTree(tree)
+		!isTree(tree) ||
+		covered === null
 	) {
 		return null
 	}
@@ -243,6 +251,7 @@ async function readSnapshot(file: string): Promise<Snapshot | null> {
 		shard,
 		projects: projects as string[],
 		tree,
+		tests: covered,
 	}
 }
 
@@ -261,7 +270,9 @@ export function isTreeSnapshotProvider(
 }
 
 /** The provider vitest loaded: the root config's `experimental.vcsProvider`, when it is ours. */
-export function configuredProvider(vitest: Vitest): TreeSnapshotProvider | null {
+export function configuredProvider(
+	vitest: Vitest,
+): TreeSnapshotProvider | null {
 	const configured: unknown = vitest.config.experimental.vcsProvider
 	return isTreeSnapshotProvider(configured) ? configured : null
 }
@@ -269,8 +280,6 @@ export function configuredProvider(vitest: Vitest): TreeSnapshotProvider | null 
 export class TreeSnapshotProvider implements VCSProvider {
 	readonly [PROVIDER_BRAND] = true
 	vitest!: Vitest
-	/** Name of a sequencer that is not Blacksmith's and has not been allowed; every test then counts as changed. */
-	customSequencer: string | null = null
 	/**
 	 * Recorded test files none of whose recorded imports changed: the provider
 	 * vouches that they need not run, whatever filters the run also applies.
@@ -320,12 +329,6 @@ export class TreeSnapshotProvider implements VCSProvider {
 	): Promise<string[] | null> {
 		const shard = this.vitest.config.shard
 
-		if (this.customSequencer !== null) {
-			log(
-				`sharding is ${this.customSequencer}, not Blacksmith's; running every test of the ${describeShard(shard)} (set allowCustomShards to keep the selection)`,
-			)
-			return null
-		}
 		const snapshot = await readSnapshot(snapshotPath(this.vitest, dir))
 		if (!snapshot) {
 			log(
@@ -353,12 +356,28 @@ export class TreeSnapshotProvider implements VCSProvider {
 			await anchoredPaths(this.vitest, repo, dir, this.dependencies),
 		)
 		const changedPaths = diffTrees(snapshot.tree, tree)
-		const unrecorded = dependencies.filter(
-			(dependency) =>
-				dependency.recordedAt === undefined &&
-				inShard(root, dependency.file, shard),
+		// Entries without a record are test files vitest has never seen; a test
+		// the snapshot does not vouch for has no trustworthy record either,
+		// whatever vitest's dependencies.json holds about it.
+		const uncovered = new Set(
+			dependencies
+				.filter(
+					(dependency) =>
+						dependency.recordedAt === undefined &&
+						inShard(root, dependency.file, shard),
+				)
+				.map((dependency) => dependency.file),
 		)
-		const changed = new Set(unrecorded.map((dependency) => dependency.file))
+		for (const specification of await this.vitest.globTestSpecifications()) {
+			const file = specification.moduleId
+			if (
+				inShard(root, file, shard) &&
+				!snapshot.tests.has(repoRelative(repo, file))
+			) {
+				uncovered.add(file)
+			}
+		}
+		const changed = new Set(uncovered)
 		for (const relative of changedPaths) {
 			if (LOCKFILES.has(path.basename(relative))) {
 				log(
@@ -386,7 +405,7 @@ export class TreeSnapshotProvider implements VCSProvider {
 			}
 		}
 		log(
-			`${changedPaths.length} files changed since ${snapshot.head.slice(0, 12)}, ${unrecorded.length} unrecorded test files${mapped > 0 ? `, ${mapped} test files via dependencies` : ''}`,
+			`${changedPaths.length} files changed since ${snapshot.head.slice(0, 12)}, ${uncovered.size} test files not covered by it${mapped > 0 ? `, ${mapped} test files via dependencies` : ''}`,
 		)
 		return [...changed]
 	}
@@ -422,12 +441,7 @@ export class ShadowAnalysis {
 
 	constructor(
 		private readonly vitest: Vitest,
-		private readonly options: {
-			cache: boolean
-			cachePrefix?: string | undefined
-			customSequencer: string | null
-			dependencies: DependencyRule[]
-		},
+		private readonly dependencies: DependencyRule[],
 	) {
 		this.result = this.run().catch((error) => ({
 			wouldRun: null,
@@ -447,12 +461,10 @@ export class ShadowAnalysis {
 			reason,
 		})
 		const base = process.env[ENV_CACHE_URL]
-		if (!this.options.cache) return none('dependency cache disabled')
 		if (!base) return none(`${ENV_CACHE_URL} is not set`)
 		const vitest = this.vitest
 		const repo = await repoRoot(vitest.config.root)
 		const key = cacheKey({
-			cachePrefix: this.options.cachePrefix,
 			snapshotVersion: SNAPSHOT_VERSION,
 			projects: projectNames(vitest),
 			shard: vitest.config.shard ?? null,
@@ -473,8 +485,7 @@ export class ShadowAnalysis {
 		]
 		const provider = new TreeSnapshotProvider()
 		provider.vitest = vitest
-		provider.customSequencer = this.options.customSequencer
-		provider.dependencies = this.options.dependencies
+		provider.dependencies = this.dependencies
 		let changed = 0
 		let lastMessage = ''
 		const selected = await provider.select(
@@ -507,7 +518,9 @@ export class ShadowAnalysis {
 		// record or globalSetup rerun the project; otherwise a test reruns when
 		// it has no record or one of its recorded dependencies changed.
 		const triggers = vitest.config.forceRerunTriggers
-		if (selected.some((file) => picomatch.isMatch(file, triggers, { dot: true }))) {
+		if (
+			selected.some((file) => picomatch.isMatch(file, triggers, { dot: true }))
+		) {
 			return all('a changed file matches forceRerunTriggers')
 		}
 		if (dependsOnChange(vitest.vite.config.configFileDependencies)) {
@@ -588,10 +601,8 @@ export class SnapshotRecorder implements Reporter {
 	constructor(
 		private readonly provider: TreeSnapshotProvider,
 		private readonly options: {
-			cache: boolean
-			cachePrefix?: string | undefined
 			shadow?: ShadowAnalysis | undefined
-		} = { cache: true },
+		} = {},
 	) {}
 
 	/** Shadow mode's verdict for this run, logged once the run has finished. */
@@ -661,7 +672,9 @@ export class SnapshotRecorder implements Reporter {
 		reason: TestRunEndReason,
 	): Promise<void> {
 		await this.reportShadow(modules)
-		if (reason !== 'passed' || !(await this.coveredShard())) return
+		if (reason !== 'passed') return
+		const covered = await this.coveredTests()
+		if (covered === null) return
 		const cacheDir = this.vitest.vite.config.cacheDir
 		const { root, shard } = this.vitest.config
 		const repo = await repoRoot(root)
@@ -679,6 +692,7 @@ export class SnapshotRecorder implements Reporter {
 					this.provider.dependencies,
 				),
 			),
+			tests: BloomFilter.from(covered.map((file) => repoRelative(repo, file))),
 		}
 		const file = snapshotPath(this.vitest, cacheDir)
 		await mkdir(path.dirname(file), { recursive: true })
@@ -691,9 +705,8 @@ export class SnapshotRecorder implements Reporter {
 	/** Puts the record and this anchor in the Actions cache when a run can reach it. */
 	private async publish(snapshot: Snapshot): Promise<void> {
 		const base = process.env[ENV_CACHE_URL]
-		if (!base || !this.options.cache) return
+		if (!base) return
 		const key = cacheKey({
-			cachePrefix: this.options.cachePrefix,
 			snapshotVersion: snapshot.version,
 			projects: snapshot.projects,
 			shard: snapshot.shard,
@@ -717,20 +730,23 @@ export class SnapshotRecorder implements Reporter {
 		}
 	}
 
-	/** True when every test owned by this shard either ran or was deselected by our own provider. */
-	private async coveredShard(): Promise<boolean> {
+	/** The tests this shard owns, when every one of them ran or was deselected by our own provider; `null` when the run covered less. */
+	private async coveredTests(): Promise<string[] | null> {
 		if (this.partial || this.vitest.getGlobalTestNamePattern() !== undefined) {
-			return false
+			return null
 		}
 		const { root, shard } = this.vitest.config
 		const { deselected } = this.activeProvider()
-		const owned = await this.vitest.globTestSpecifications()
-		return owned.every(
-			(specification) =>
-				!inShard(root, specification.moduleId, shard) ||
-				this.started.has(specification.moduleId) ||
-				deselected.has(specification.moduleId),
-		)
+		const owned = [
+			...new Set(
+				(await this.vitest.globTestSpecifications())
+					.map((specification) => specification.moduleId)
+					.filter((file) => inShard(root, file, shard)),
+			),
+		]
+		return owned.every((file) => this.started.has(file) || deselected.has(file))
+			? owned
+			: null
 	}
 }
 
@@ -741,10 +757,7 @@ export class SnapshotRecorder implements Reporter {
  * directory itself may exist: every `vitest run` on one config shares it
  * (its hash is the root `test.name`, not the `--project` filter).
  */
-export async function restoreDependencyCache(
-	vitest: Vitest,
-	cachePrefix?: string,
-): Promise<void> {
+export async function restoreDependencyCache(vitest: Vitest): Promise<void> {
 	const base = process.env[ENV_CACHE_URL]
 	if (!base) {
 		if (process.env.TURBO_HASH)
@@ -764,7 +777,6 @@ export async function restoreDependencyCache(
 	}
 	const repo = await repoRoot(vitest.config.root)
 	const key = cacheKey({
-		cachePrefix,
 		snapshotVersion: SNAPSHOT_VERSION,
 		projects: projectNames(vitest),
 		shard: vitest.config.shard ?? null,

@@ -29,7 +29,7 @@ export const RESULTS_PATH = '/api/jobs/test-results'
  * project resolve two installs of this package has two `BlacksmithReporter`
  * classes, and `instanceof` would let both register.
  */
-export const REPORTER_BRAND = Symbol.for('@blacksmith/vitest:reporter')
+export const REPORTER_BRAND = Symbol.for('@useblacksmith/vitest:reporter')
 
 export function isBlacksmithReporter(reporter: unknown): boolean {
 	return (
