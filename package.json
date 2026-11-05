@@ -13,11 +13,10 @@
 		"dist"
 	],
 	"scripts": {
-		"build": "node build.mjs",
+		"build": "esbuild src/index.ts src/record-reads.ts --bundle --outdir=dist --format=esm --platform=node --target=node20 --minify --packages=external --legal-comments=none && tsc -p tsconfig.build.json --emitDeclarationOnly",
 		"prepack": "npm run build",
 		"check:types": "tsc --noEmit",
-		"test": "vitest run",
-		"build:types": "tsc -p tsconfig.build.json --emitDeclarationOnly"
+		"test": "vitest run"
 	},
 	"peerDependencies": {
 		"vitest": ">=5.1.0"
