@@ -2,6 +2,12 @@
 
 Speed up vitest execution by only running tests impacted by a change, with automatic caching when run on Blacksmith.
 
+## Usage
+
+```sh
+npm install --save-dev @blacksmith/vitest
+```
+
 ```ts
 // vitest.config.ts
 import { defineConfig } from 'vitest/config'
@@ -12,29 +18,28 @@ export default defineConfig({
 })
 ```
 
-Requires Vitest 5.1 or newer.
+That is the whole setup: in CI the plugin runs only the test files affected since the last green run, and locally every test runs. No `--changed` flag and no `actions/cache` steps are needed. `--shard=i/n` works as usual; the plugin assigns files to shards itself so each shard's cache stays stable.
 
-## How it works
-
-- Vitest records each test file's imports (`experimental.recordDependencies`); a setup file the plugin adds also records every `fs` read a test makes (fixtures, `.env`, directory listings), so a changed fixture reruns the tests that read it.
-- After a green run that covered every test it owns, the plugin writes an anchor beside the record: mode and blob hash per recorded file, a listing hash per recorded directory, plus lockfiles and the shard spec.
-- On the next run it diffs the anchor against the checkout and hands Vitest the changed paths; a test with no record, a changed lockfile, or a missing/foreign anchor runs everything. Only a green run that covered its whole shard writes a new anchor, so a failing test keeps rerunning until the tree that broke it changes.
-- On a Blacksmith runner the record and anchor are kept in the Actions cache by the plugin itself (no `actions/cache` steps), keyed by plugin version, project set, shard and commit. Elsewhere nothing is fetched or sent and the run is unchanged.
-- `--shard=i/n` is handled by the plugin's `HashShardSequencer`: a test file belongs to the shard `sha1(path) % n` picks, so each shard's cache always describes the same files.
-
-Not seen by the recorder: reads from a child process, `globalSetup`, or browser-mode projects. Put such inputs in Vitest's own `forceRerunTriggers`.
+Requires Vitest 5.1 or newer. On an older Vitest the plugin logs once and every test runs.
 
 ## Options
 
 | option | default | effect |
 |---|---|---|
-| `allTests` | `true` | Run everything. Set to `false` to turn `--changed` on from the config; on a Vitest that cannot honour it every test runs and the plugin says so once. |
-| `disableCache` | `false` | Keep the record out of the Actions cache. |
-| `cachePrefix` | `'blacksmith-vitest'` | First segment of the cache key; change it to start from empty entries. |
-| `shadow` | `false` | Run every test, but fetch the cached record and log what the affected selection would have run and which failed files it would have skipped. A green run still saves the record. |
-| `allowCustomShards` | `false` | Keep selecting when `test.sequence.sequencer` is not Blacksmith's. By default such a run treats every test as changed and logs `sharding is <Name>, not Blacksmith's`. Only enable it for a sequencer that extends or delegates to `HashShardSequencer`. |
+| `allTests` | `true` | Run every test. Set to `false` where you want the affected selection (CI). |
+| `shadow` | `false` | Run every test, but log what the affected selection would have run and which failed files it would have skipped. Use it to evaluate the plugin on a repo before switching `allTests` off. |
+| `disableCache` | `false` | Do not store the dependency record in the Actions cache. |
+| `cachePrefix` | `'blacksmith-vitest'` | First segment of the cache key; change it to discard every existing entry. |
+| `allowCustomShards` | `false` | Keep the affected selection when your config or another plugin sets `test.sequence.sequencer`. By default such a run runs every test and logs why. Only enable it for a sequencer that extends or delegates to the plugin's `HashShardSequencer`. |
 
-`BlacksmithReporter` (opt in, `test.reporters: ['default', new BlacksmithReporter()]`) posts test outcomes to Blacksmith on a Blacksmith runner and does nothing elsewhere.
+## Tradeoffs
+
+- **The first run is a full run.** Selection needs a cached record from an earlier green run of the same shard; the first run after enabling the plugin, after changing the shard count, or after a lockfile change runs everything.
+- **A failing shard keeps rerunning its tests until it passes.** The record is only saved after a green run, so a failure is never hidden by a later unrelated commit.
+- **Inputs read outside the test process are not tracked.** Imports and `fs` reads made by the tests themselves (fixtures, `.env`, directory listings) are tracked. Reads from a child process, from `globalSetup`, or in browser-mode projects are not; list such inputs in Vitest's `forceRerunTriggers` so a change to them runs everything.
+- **Caching needs Blacksmith.** The record is stored in the Actions cache from Blacksmith runners. Anywhere else (GitHub-hosted runners, local runs) nothing is cached and every test runs.
+- **Shard membership changes.** Files are assigned to shards by a hash of their path rather than Vitest's default contiguous split, so per-shard durations can differ from before; totals do not.
+- **Custom sequencers are refused by default.** See `allowCustomShards`.
 
 ## Development
 
