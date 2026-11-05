@@ -5,6 +5,8 @@ import type { Vitest } from 'vitest/node'
 
 import {
 	compileDependencies,
+	configuredProvider,
+	isTreeSnapshotProvider,
 	isSnapshotRecorder,
 	restoreDependencyCache,
 	ShadowAnalysis,
@@ -80,10 +82,7 @@ export interface BlacksmithOptions {
 }
 
 /** Whether this Vitest wired up the pieces `--changed` selection relies on. */
-function supportsChanged(
-	vitest: Vitest,
-	provider: TreeSnapshotProvider,
-): boolean {
+function supportsChanged(vitest: Vitest): boolean {
 	const { vcs } = vitest as { vcs?: { findChangedFiles?: unknown } }
 	const experimental = vitest.config.experimental as
 		| { recordDependencies?: boolean; vcsProvider?: unknown }
@@ -91,7 +90,7 @@ function supportsChanged(
 	return (
 		typeof vcs?.findChangedFiles === 'function' &&
 		experimental?.recordDependencies === true &&
-		experimental.vcsProvider === provider
+		isTreeSnapshotProvider(experimental.vcsProvider)
 	)
 }
 
@@ -121,8 +120,13 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 			}
 		},
 		async configureVitest({ vitest, project }) {
-			provider.vitest = vitest
-			provider.customSequencer = options.allowCustomShards
+			// Vitest loads the root config's provider. A project with its own
+			// `root` re-evaluates this config file, so this hook may run from a
+			// second plugin instance; configure the provider vitest actually uses.
+			const active = configuredProvider(vitest) ?? provider
+			active.vitest = vitest
+			active.dependencies = provider.dependencies
+			active.customSequencer = options.allowCustomShards
 				? null
 				: customSequencer(vitest.config.sequence.sequencer)
 			if (options.shadow) {
@@ -135,8 +139,8 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 				shadow ??= new ShadowAnalysis(vitest, {
 					cache: !options.disableCache,
 					cachePrefix: options.cachePrefix,
-					customSequencer: provider.customSequencer,
-					dependencies: provider.dependencies,
+					customSequencer: active.customSequencer,
+					dependencies: active.dependencies,
 				})
 			} else {
 				restored ??= options.disableCache
@@ -151,7 +155,7 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 				!changedApplied
 			) {
 				changedApplied = true
-				if (supportsChanged(vitest, provider)) {
+				if (supportsChanged(vitest)) {
 					vitest.config.changed = true
 					// An empty selection is the success case here, not a misconfigured run.
 					vitest.config.passWithNoTests = true
@@ -173,7 +177,7 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 			const reporters = vitest.config.reporters
 			if (!reporters.some(isSnapshotRecorder)) {
 				reporters.push(
-					new SnapshotRecorder(provider, {
+					new SnapshotRecorder(active, {
 						cache: !options.disableCache,
 						cachePrefix: options.cachePrefix,
 						shadow,

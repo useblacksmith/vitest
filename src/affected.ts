@@ -138,10 +138,9 @@ async function recordedDependencies(
 	const records = await readRecords(vitest, dir)
 	if (!records) return new Map()
 	const result = new Map<string, Set<string>>()
-	for (const [name, project] of Object.entries(records.projects ?? {})) {
-		const root =
-			vitest.projects.find((candidate) => candidate.name === name)?.config
-				.root ?? vitest.config.root
+	for (const project of Object.values(records.projects ?? {})) {
+		// Vitest records every project's paths relative to the root config's root.
+		const root = vitest.config.root
 		for (const [test, record] of Object.entries(project.files)) {
 			// A test file two projects share keeps the dependencies of both.
 			const file = path.resolve(root, test)
@@ -178,10 +177,9 @@ async function anchoredPaths(
 		}
 	}
 	const records = await readRecords(vitest, dir)
-	for (const [name, project] of Object.entries(records?.projects ?? {})) {
-		const root =
-			vitest.projects.find((candidate) => candidate.name === name)?.config
-				.root ?? vitest.config.root
+	for (const project of Object.values(records?.projects ?? {})) {
+		// Vitest records every project's paths relative to the root config's root.
+		const root = vitest.config.root
 		for (const module of project.modules) {
 			paths.add(relative(path.resolve(root, module)))
 		}
@@ -253,7 +251,23 @@ async function readSnapshot(file: string): Promise<Snapshot | null> {
  * stored anchor against the recorded paths as they are now. Falls back
  * to "everything" whenever the snapshot cannot vouch for this shard.
  */
+const PROVIDER_BRAND = Symbol.for('blacksmith.treeSnapshotProvider')
+
+/** True for a `TreeSnapshotProvider` from any copy of this module (a project with its own root re-evaluates the config file, so it gets its own copy). */
+export function isTreeSnapshotProvider(
+	value: unknown,
+): value is TreeSnapshotProvider {
+	return typeof value === 'object' && value !== null && PROVIDER_BRAND in value
+}
+
+/** The provider vitest loaded: the root config's `experimental.vcsProvider`, when it is ours. */
+export function configuredProvider(vitest: Vitest): TreeSnapshotProvider | null {
+	const configured: unknown = vitest.config.experimental.vcsProvider
+	return isTreeSnapshotProvider(configured) ? configured : null
+}
+
 export class TreeSnapshotProvider implements VCSProvider {
+	readonly [PROVIDER_BRAND] = true
 	vitest!: Vitest
 	/** Name of a sequencer that is not Blacksmith's and has not been allowed; every test then counts as changed. */
 	customSequencer: string | null = null
@@ -506,7 +520,8 @@ export class ShadowAnalysis {
 			)
 			if (specs.length === 0) continue
 			const record = records?.projects[project.name]
-			const projectRoot = project.config.root
+			// Record paths are relative to the root config's root, whatever the project's.
+			const projectRoot = vitest.config.root
 			const modules = (indexes: number[] | undefined) =>
 				indexes?.map((index) =>
 					path.resolve(projectRoot, record?.modules[index] ?? ''),
@@ -626,16 +641,7 @@ export class SnapshotRecorder implements Reporter {
 
 	/** The provider vitest is using: the root config's, which may come from another copy of this module. */
 	private activeProvider(): { deselected: Set<string> } {
-		const configured: unknown = this.vitest.config.experimental.vcsProvider
-		if (
-			typeof configured === 'object' &&
-			configured !== null &&
-			'deselected' in configured &&
-			configured.deselected instanceof Set
-		) {
-			return configured as { deselected: Set<string> }
-		}
-		return this.provider
+		return configuredProvider(this.vitest) ?? this.provider
 	}
 
 	onInit(vitest: Vitest): void {

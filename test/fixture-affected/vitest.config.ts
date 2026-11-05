@@ -27,6 +27,21 @@ export default defineConfig({
 		: {}),
 	test: {
 		include: ['src/**/*.test.ts'],
+		// A project with its own root makes vitest re-evaluate this file.
+		...(process.env.BLACKSMITH_ROOTED_PROJECT === '1'
+			? {
+					projects: [
+						{
+							extends: true,
+							test: {
+								name: 'rooted',
+								root: './src',
+								include: ['one.test.ts', 'five.test.ts'],
+							},
+						},
+					],
+				}
+			: {}),
 		...(process.env.BLACKSMITH_CUSTOM_SEQUENCER === '1'
 			? { sequence: { sequencer: ContiguousSequencer } }
 			: {}),

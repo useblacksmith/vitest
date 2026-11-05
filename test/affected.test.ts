@@ -909,3 +909,23 @@ describe('the dependency record travels through the Actions cache', () => {
 		expect(run.output).not.toContain('dependency cache')
 	})
 })
+
+describe('a project with its own root', () => {
+	let repo: Repo
+	beforeAll(() => {
+		repo = new Repo('rooted')
+		repo.env = { BLACKSMITH_ROOTED_PROJECT: '1', BLACKSMITH_CHANGED: '1' }
+	})
+
+	test('selects from the provider vitest loaded, not the re-evaluated config\'s copy', async () => {
+		const first = await repo.run()
+		expect(first.exitCode, first.output).toBe(0)
+		expect(first.ran).toEqual(['five', 'one'])
+		expect(first.output).not.toContain('does not support running changed tests')
+		expect((await repo.run()).ran).toEqual([])
+		repo.write('src/fixtures/five/data.json', '{ "value": "five", "n": 4 }\n')
+		const dirty = await repo.run()
+		expect(dirty.exitCode, dirty.output).toBe(0)
+		expect(dirty.ran, dirty.output).toEqual(['five'])
+	})
+})
