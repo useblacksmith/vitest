@@ -24,6 +24,14 @@ With the plugin, vitest only runs tests impacted by changes since the last succe
 
 Requires Vitest 5.1 or newer.
 
+## Running locally
+
+The same selection applies locally: a run reruns what changed on disk since the last successful run, committed or not. To run every test locally and select only in CI:
+
+```ts
+plugins: [blacksmith({ allTests: !process.env.CI })],
+```
+
 ## How it works
 
 The plugin uses Vitest's dependency tracking: each run records which modules and files every test depends on, and the next run compares the checkout against that record to calculate the impacted test set. The record is stored in the Actions cache when run on Blacksmith, so runs on different runners pick up where the last successful run left off.
@@ -32,7 +40,7 @@ The plugin uses Vitest's dependency tracking: each run records which modules and
 
 | option | default | effect |
 |---|---|---|
-| `allTests` | `false` | Run every test instead of the affected selection (`allTests: !process.env.CI`, say). |
+| `allTests` | `false` | Run every test instead of the affected selection. |
 | `shadow` | `false` | Run every test, but log what the affected selection would have run and which failed files it would have skipped. Use it to evaluate the plugin on a repo before relying on the selection. |
 | `disableCache` | `false` | Do not store the dependency record in the Actions cache. |
 | `cachePrefix` | `'blacksmith-vitest'` | First segment of the cache key; change it to discard every existing entry. |
