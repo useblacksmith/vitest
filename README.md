@@ -20,9 +20,13 @@ export default defineConfig({
 })
 ```
 
-In CI the plugin runs only the test files affected since the last green run. `--shard=i/n` works as usual; the plugin assigns files to shards itself so each shard's cache stays stable.
+With the plugin, vitest only runs tests impacted by changes since the last successful run. `--shard=i/n` works as usual; the plugin assigns files to shards itself so each shard's cache stays stable.
 
 Requires Vitest 5.1 or newer.
+
+## How it works
+
+The plugin uses Vitest's dependency tracking: each run records which modules and files every test depends on, and the next run compares the checkout against that record to calculate the impacted test set. The record is stored in the Actions cache when run on Blacksmith, so runs on different runners pick up where the last successful run left off.
 
 ## Options
 
@@ -36,12 +40,7 @@ Requires Vitest 5.1 or newer.
 
 ## Tradeoffs
 
-- **The first run is a full run.** Selection needs a cached record from an earlier green run of the same shard; the first run after enabling the plugin, after changing the shard count, or after a lockfile change runs everything.
-- **A failing shard keeps rerunning its tests until it passes.** The record is only saved after a green run, so a failure is never hidden by a later unrelated commit.
-- **Inputs read outside the test process are not tracked.** Imports and `fs` reads made by the tests themselves (fixtures, `.env`, directory listings) are tracked. Reads from a child process, from `globalSetup`, or in browser-mode projects are not; list such inputs in Vitest's `forceRerunTriggers` so a change to them runs everything.
-- **Caching needs Blacksmith.** The record is stored in the Actions cache from Blacksmith runners. Anywhere else (GitHub-hosted runners, local runs) nothing is cached and every test runs.
-- **Shard membership changes.** Files are assigned to shards by a hash of their path rather than Vitest's default contiguous split, so per-shard durations can differ from before; totals do not.
-- **Custom sequencers are refused by default.** See `allowCustomShards`.
+- **Only reads made by the test process are tracked.** Imports and `fs` reads from the tests themselves are; reads from a child process, `globalSetup`, or browser-mode projects are not. List such inputs in Vitest's `forceRerunTriggers` so a change to them runs everything.
 
 ## Development
 
