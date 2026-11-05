@@ -6,12 +6,6 @@ Speed up vitest execution by only running tests impacted by a change, with autom
 
 ## Usage
 
-The plugin ships as a tarball (`useblacksmith-vitest-<version>.tgz`), not on the npm registry:
-
-```sh
-npm install --save-dev ./useblacksmith-vitest-0.2.0.tgz
-```
-
 ```ts
 // vitest.config.ts
 import { defineConfig } from 'vitest/config'
@@ -49,7 +43,7 @@ The plugin uses Vitest's dependency tracking: each run records which modules and
 ## Caveats
 
 - **Only dependencies in the test process are tracked.** `import`, `require`, and `fs` are automatically tracked. Files read from a child process, `globalSetup`, or outside of node are not; declare them with the `dependencies` option.
-- **Shards must be stable for maximal efficacy.** The plugin assigns test files to shards by a hash of their path, so a file stays in its shard as others are added or removed. A custom `test.sequence.sequencer` is honoured, but every test that moves to another shard reruns there.
+- **Shards must be stable for maximal efficacy.** The plugin assigns test files to shards by a hash of their path, so a file stays in its shard as others are added or removed. A custom `test.sequence.sequencer` is honoured, with its shard assignment taken over the full test list; every test that moves to another shard reruns there.
 
 ## Development
 

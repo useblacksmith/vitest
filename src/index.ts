@@ -13,7 +13,11 @@ import {
 	SnapshotRecorder,
 	TreeSnapshotProvider,
 } from './affected.js'
-import { customSequencer, HashShardSequencer } from './sequencer.js'
+import {
+	customSequencer,
+	HashShardSequencer,
+	stableShards,
+} from './sequencer.js'
 
 export { BlacksmithReporter } from './reporter.js'
 export { HashShardSequencer, shardFor } from './sequencer.js'
@@ -88,8 +92,7 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 		name: 'blacksmith',
 		config(userConfig) {
 			// Vite merges this over the user's config, so a sequencer the config
-			// names is left in place rather than silently replaced; a test that
-			// moves shards under it is outside its new shard's record and reruns.
+			// names is kept; `configureVitest` pins its shard assignment.
 			const theirs = customSequencer(
 				(userConfig as { test?: { sequence?: { sequencer?: unknown } } }).test
 					?.sequence?.sequencer,
@@ -110,6 +113,14 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 			const active = configuredProvider(vitest) ?? provider
 			active.vitest = vitest
 			active.dependencies = provider.dependencies
+			// Their sequencer's shards must not depend on which tests the
+			// selection kept, or the provider's view of the shard and vitest's
+			// would differ.
+			if (customSequencer(vitest.config.sequence.sequencer)) {
+				vitest.config.sequence.sequencer = stableShards(
+					vitest.config.sequence.sequencer,
+				)
+			}
 			if (options.shadow) {
 				if (vitest.config.changed) {
 					vitest.logger.warn(

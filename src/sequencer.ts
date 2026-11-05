@@ -1,9 +1,17 @@
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 
-import { BaseSequencer, type TestSpecification } from 'vitest/node'
+import {
+	BaseSequencer,
+	type ResolvedConfig,
+	type TestSpecification,
+	type Vitest,
+} from 'vitest/node'
 
 const BRAND = Symbol.for('blacksmith.vitest.sequencer')
+const WRAPPED = Symbol.for('blacksmith.vitest.sequencer.wrapped')
+
+type SequencerClass = ResolvedConfig['sequence']['sequencer']
 
 /**
  * The name of the configured sequencer when it is not Blacksmith's (nor a
@@ -40,6 +48,53 @@ export function inShard(
  * other tests are added, removed or filtered out by `--changed`, so each
  * shard's dependency record only ever has to vouch for its own tests.
  */
+/**
+ * Vitest hands `shard()` the specs `--changed` kept, so a sequencer that
+ * slices by position moves tests between shards as the selection changes,
+ * and a test two shards disagree about can run on neither. The wrapper takes
+ * the sequencer's own assignment over the full test list, as on a full run,
+ * and keeps it whatever the selection; `sort()` stays the sequencer's.
+ */
+export function stableShards(Theirs: SequencerClass): SequencerClass {
+	return class extends Theirs {
+		static readonly [BRAND] = true
+		static readonly [WRAPPED] = Theirs
+		readonly #vitest: Vitest
+		constructor(vitest: Vitest) {
+			super(vitest)
+			this.#vitest = vitest
+		}
+		override shard = async (
+			files: TestSpecification[],
+		): Promise<TestSpecification[]> => {
+			const owns = await shardOwner(this.#vitest)
+			return files.filter((file) => owns(file.moduleId))
+		}
+	}
+}
+
+/**
+ * Which tests this shard runs, independent of the selection: by path hash
+ * under Blacksmith's sequencer, by the wrapped sequencer's own `shard()`
+ * over the full test list otherwise.
+ */
+export async function shardOwner(
+	vitest: Vitest,
+): Promise<(moduleId: string) => boolean> {
+	const { root, shard } = vitest.config
+	if (!shard) return () => true
+	const Theirs = (
+		vitest.config.sequence.sequencer as { [WRAPPED]?: SequencerClass }
+	)[WRAPPED]
+	if (!Theirs) return (moduleId) => inShard(root, moduleId, shard)
+	const owned = new Set(
+		(await new Theirs(vitest).shard(await vitest.globTestSpecifications())).map(
+			(specification) => specification.moduleId,
+		),
+	)
+	return (moduleId) => owned.has(moduleId)
+}
+
 export class HashShardSequencer extends BaseSequencer {
 	/** Marks this class and its subclasses, across copies of the module. */
 	static readonly [BRAND] = true

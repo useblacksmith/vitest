@@ -786,6 +786,35 @@ describe('the dependency record travels through the Actions cache', () => {
 		expect(run.ran).toEqual([])
 	})
 
+	test('under a custom sequencer a changed test runs on exactly one shard', async () => {
+		// Contiguous slicing of only the selected specs would put two.test.ts
+		// (hash shard 2/2) on a different shard in each shard's own run.
+		const producer = new Repo('custom-shards-producer')
+		producer.env = {
+			ACTIONS_RESULTS_URL: cache.url,
+			BLACKSMITH_CUSTOM_SEQUENCER: '1',
+		}
+		for (const shard of ['1/2', '2/2']) {
+			const run = await producer.run(`--shard=${shard}`)
+			expect(run.exitCode, run.output).toBe(0)
+			expect(run.output).toContain('saved dependency cache')
+		}
+		const ran: string[] = []
+		for (const shard of ['1/2', '2/2']) {
+			const repo = new Repo(`custom-shards-${shard[0]}`)
+			repo.env = {
+				ACTIONS_RESULTS_URL: cache.url,
+				BLACKSMITH_CUSTOM_SEQUENCER: '1',
+			}
+			repo.write('src/lib/a.ts', "export const a = 'a' // edited\n")
+			const run = await repo.run('--changed', `--shard=${shard}`)
+			expect(run.exitCode, run.output).toBe(0)
+			expect(run.output).toContain('restored dependency cache')
+			ran.push(...run.ran)
+		}
+		expect(ran.sort()).toEqual(['one', 'two'])
+	})
+
 	test('a custom cacheDir is where the record is restored to and saved from', async () => {
 		const producer = new Repo('cache-custom-producer')
 		producer.env = {

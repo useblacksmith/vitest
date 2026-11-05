@@ -27,7 +27,7 @@ import {
 	repoRoot,
 	type Tree,
 } from './git.js'
-import { inShard } from './sequencer.js'
+import { shardOwner } from './sequencer.js'
 
 export const SNAPSHOT_FILE = 'blacksmith.json'
 // Bumped whenever the snapshot's shape changes or the records an anchor
@@ -356,6 +356,7 @@ export class TreeSnapshotProvider implements VCSProvider {
 			await anchoredPaths(this.vitest, repo, dir, this.dependencies),
 		)
 		const changedPaths = diffTrees(snapshot.tree, tree)
+		const owns = await shardOwner(this.vitest)
 		// Entries without a record are test files vitest has never seen; a test
 		// the snapshot does not vouch for has no trustworthy record either,
 		// whatever vitest's dependencies.json holds about it.
@@ -363,17 +364,13 @@ export class TreeSnapshotProvider implements VCSProvider {
 			dependencies
 				.filter(
 					(dependency) =>
-						dependency.recordedAt === undefined &&
-						inShard(root, dependency.file, shard),
+						dependency.recordedAt === undefined && owns(dependency.file),
 				)
 				.map((dependency) => dependency.file),
 		)
 		for (const specification of await this.vitest.globTestSpecifications()) {
 			const file = specification.moduleId
-			if (
-				inShard(root, file, shard) &&
-				!snapshot.tests.has(repoRelative(repo, file))
-			) {
+			if (owns(file) && !snapshot.tests.has(repoRelative(repo, file))) {
 				uncovered.add(file)
 			}
 		}
@@ -396,7 +393,7 @@ export class TreeSnapshotProvider implements VCSProvider {
 		if (triggered.length > 0) {
 			for (const dependency of dependencies) {
 				if (changed.has(dependency.file)) continue
-				if (!inShard(root, dependency.file, shard)) continue
+				if (!owns(dependency.file)) continue
 				const fromRoot = rootRelative(root, dependency.file)
 				if (triggered.some((rule) => rule.tests(fromRoot))) {
 					changed.add(dependency.file)
@@ -476,9 +473,10 @@ export class ShadowAnalysis {
 		const snapshot = await readSnapshot(snapshotPath(vitest, dir))
 		const recorded = await recordedDependencies(vitest, dir)
 		const records = await readRecords(vitest, dir)
-		const { root, shard } = vitest.config
+		const { root } = vitest.config
+		const owns = await shardOwner(vitest)
 		const specifications = (await vitest.globTestSpecifications()).filter(
-			(specification) => inShard(root, specification.moduleId, shard),
+			(specification) => owns(specification.moduleId),
 		)
 		const owned = [
 			...new Set(specifications.map((specification) => specification.moduleId)),
@@ -735,13 +733,13 @@ export class SnapshotRecorder implements Reporter {
 		if (this.partial || this.vitest.getGlobalTestNamePattern() !== undefined) {
 			return null
 		}
-		const { root, shard } = this.vitest.config
+		const owns = await shardOwner(this.vitest)
 		const { deselected } = this.activeProvider()
 		const owned = [
 			...new Set(
 				(await this.vitest.globTestSpecifications())
 					.map((specification) => specification.moduleId)
-					.filter((file) => inShard(root, file, shard)),
+					.filter(owns),
 			),
 		]
 		return owned.every((file) => this.started.has(file) || deselected.has(file))
