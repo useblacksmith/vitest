@@ -28,7 +28,7 @@ import { shardFor } from '../src/sequencer.ts'
 import { packageRoot } from './harness.ts'
 
 const vitestBin = path.join(packageRoot, 'node_modules', 'vitest', 'vitest.mjs')
-const TESTS = ['one', 'two', 'three', 'five', 'six', 'snap', 'alias']
+const TESTS = ['one', 'two', 'three', 'five', 'six', 'snap', 'alias', 'mapped']
 
 interface Run {
 	exitCode: number
@@ -198,6 +198,22 @@ describe('--changed against the tree snapshot', () => {
 			)
 			expect((await repo.run('--changed')).ran, name).toEqual(['alias'])
 			repo.commit(`edit ${name}`)
+		}
+	})
+
+	test('a change to a declared dependency reruns the tests mapped to it', async () => {
+		repo.env = { BLACKSMITH_CHANGED: '1' }
+		try {
+			expect((await repo.run()).ran).toEqual([])
+			repo.write('mapped/data.txt', 'v2\n')
+			const mapped = await repo.run()
+			expect(mapped.exitCode, mapped.output).toBe(0)
+			expect(mapped.ran).toEqual(['mapped'])
+			expect(mapped.output).toContain('1 test files via dependencies')
+			repo.commit('edit mapped data')
+			expect((await repo.run()).ran).toEqual([])
+		} finally {
+			repo.env = {}
 		}
 	})
 

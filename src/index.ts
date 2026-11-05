@@ -4,6 +4,7 @@ import type { Plugin } from 'vitest/config'
 import type { Vitest } from 'vitest/node'
 
 import {
+	compileDependencies,
 	isSnapshotRecorder,
 	restoreDependencyCache,
 	ShadowAnalysis,
@@ -68,6 +69,14 @@ export interface BlacksmithOptions {
 	 * sequencer keeps that membership (extends or delegates to it).
 	 */
 	allowCustomShards?: boolean
+	/**
+	 * Dependencies the tracking cannot see (files a test reads through a child
+	 * process, in `globalSetup`, or outside node): globs of test files mapped
+	 * to the glob(s) of the files they depend on, both relative to the config
+	 * root. A change to a matching file reruns every test file the key matches.
+	 * `{ 'tests/*.spec.ts': 'fixtures/**' }`, say.
+	 */
+	dependencies?: Record<string, string | string[]>
 }
 
 /** Whether this Vitest wired up the pieces `--changed` selection relies on. */
@@ -88,6 +97,7 @@ function supportsChanged(
 
 export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 	const provider = new TreeSnapshotProvider()
+	provider.dependencies = compileDependencies(options.dependencies)
 	let changedApplied = false
 	let restored: Promise<void> | undefined
 	let shadow: ShadowAnalysis | undefined
@@ -126,6 +136,7 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 					cache: !options.disableCache,
 					cachePrefix: options.cachePrefix,
 					customSequencer: provider.customSequencer,
+					dependencies: provider.dependencies,
 				})
 			} else {
 				restored ??= options.disableCache

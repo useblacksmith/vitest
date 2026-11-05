@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rename, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import picomatch from 'picomatch'
 
 import { cacheKey, ENV_CACHE_URL, restoreBundle, saveBundle } from './cache.js'
 
@@ -20,6 +21,7 @@ import {
 	anchorTree,
 	diffTrees,
 	headSha,
+	knownPaths,
 	lockfilePaths,
 	repoRoot,
 	type Tree,
@@ -30,6 +32,26 @@ export const SNAPSHOT_FILE = 'blacksmith.json'
 // Bumped whenever the records an anchor vouches for gain a kind of dependency,
 // so an older anchor is not trusted.
 const SNAPSHOT_VERSION = 3
+
+/** A `dependencies` entry, compiled: test files matching `tests` depend on files matching `deps`; both root-relative. */
+export interface DependencyRule {
+	tests: (file: string) => boolean
+	deps: (file: string) => boolean
+}
+
+export function compileDependencies(
+	dependencies: Readonly<Record<string, string | readonly string[]>> | undefined,
+): DependencyRule[] {
+	return Object.entries(dependencies ?? {}).map(([tests, deps]) => ({
+		tests: picomatch(tests, { dot: true }),
+		deps: picomatch(typeof deps === 'string' ? deps : [...deps], { dot: true }),
+	}))
+}
+
+/** `file` relative to the config root with `/` separators, the form the `dependencies` globs match. */
+function rootRelative(root: string, file: string): string {
+	return path.relative(root, file).split(path.sep).join('/')
+}
 
 export interface Shard {
 	index: number
@@ -136,17 +158,25 @@ async function recordedDependencies(
 /**
  * Repo-relative paths the anchor covers: every module vitest's records name
  * (imports, fs reads, config and globalSetup files), every recorded test
- * file, and lockfiles.
+ * file, lockfiles, and every file a `dependencies` rule names (nothing reads
+ * those, so the anchor is the only way a change to them is seen).
  */
 async function anchoredPaths(
 	vitest: Vitest,
 	repo: string,
 	dir: string,
+	rules: readonly DependencyRule[],
 ): Promise<string[]> {
 	// git prints and matches `/`-separated paths, whatever path.sep is.
 	const relative = (file: string) =>
 		path.relative(repo, file).split(path.sep).join('/')
 	const paths = new Set(await lockfilePaths(repo, LOCKFILES))
+	if (rules.length > 0) {
+		for (const file of await knownPaths(repo)) {
+			const fromRoot = rootRelative(vitest.config.root, path.join(repo, file))
+			if (rules.some((rule) => rule.deps(fromRoot))) paths.add(file)
+		}
+	}
 	const records = await readRecords(vitest, dir)
 	for (const [name, project] of Object.entries(records?.projects ?? {})) {
 		const root =
@@ -232,6 +262,8 @@ export class TreeSnapshotProvider implements VCSProvider {
 	 * vouches that they need not run, whatever filters the run also applies.
 	 */
 	deselected = new Set<string>()
+	/** The plugin's `dependencies` option, compiled. */
+	dependencies: DependencyRule[] = []
 
 	async findChangedFiles(options: VCSProviderOptions): Promise<string[]> {
 		this.deselected = new Set()
@@ -304,7 +336,7 @@ export class TreeSnapshotProvider implements VCSProvider {
 		const repo = await repoRoot(root)
 		const tree = await anchorTree(
 			repo,
-			await anchoredPaths(this.vitest, repo, dir),
+			await anchoredPaths(this.vitest, repo, dir, this.dependencies),
 		)
 		const changedPaths = diffTrees(snapshot.tree, tree)
 		const unrecorded = dependencies.filter(
@@ -322,8 +354,25 @@ export class TreeSnapshotProvider implements VCSProvider {
 			}
 			changed.add(path.join(repo, relative))
 		}
+		const triggered = this.dependencies.filter((rule) =>
+			changedPaths.some((relative) =>
+				rule.deps(rootRelative(root, path.join(repo, relative))),
+			),
+		)
+		let mapped = 0
+		if (triggered.length > 0) {
+			for (const dependency of dependencies) {
+				if (changed.has(dependency.file)) continue
+				if (!inShard(root, dependency.file, shard)) continue
+				const fromRoot = rootRelative(root, dependency.file)
+				if (triggered.some((rule) => rule.tests(fromRoot))) {
+					changed.add(dependency.file)
+					mapped++
+				}
+			}
+		}
 		log(
-			`${changedPaths.length} files changed since ${snapshot.head.slice(0, 12)}, ${unrecorded.length} unrecorded test files`,
+			`${changedPaths.length} files changed since ${snapshot.head.slice(0, 12)}, ${unrecorded.length} unrecorded test files${mapped > 0 ? `, ${mapped} test files via dependencies` : ''}`,
 		)
 		return [...changed]
 	}
@@ -363,6 +412,7 @@ export class ShadowAnalysis {
 			cache: boolean
 			cachePrefix?: string | undefined
 			customSequencer: string | null
+			dependencies: DependencyRule[]
 		},
 	) {
 		this.result = this.run().catch((error) => ({
@@ -410,6 +460,7 @@ export class ShadowAnalysis {
 		const provider = new TreeSnapshotProvider()
 		provider.vitest = vitest
 		provider.customSequencer = this.options.customSequencer
+		provider.dependencies = this.options.dependencies
 		let changed = 0
 		let lastMessage = ''
 		const selected = await provider.select(
@@ -442,11 +493,7 @@ export class ShadowAnalysis {
 		// record or globalSetup rerun the project; otherwise a test reruns when
 		// it has no record or one of its recorded dependencies changed.
 		const triggers = vitest.config.forceRerunTriggers
-		if (
-			selected.some((file) =>
-				triggers.some((pattern) => path.matchesGlob(file, pattern)),
-			)
-		) {
+		if (selected.some((file) => picomatch.isMatch(file, triggers, { dot: true }))) {
 			return all('a changed file matches forceRerunTriggers')
 		}
 		if (dependsOnChange(vitest.vite.config.configFileDependencies)) {
@@ -619,7 +666,12 @@ export class SnapshotRecorder implements Reporter {
 			projects: projectNames(this.vitest),
 			tree: await anchorTree(
 				repo,
-				await anchoredPaths(this.vitest, repo, cacheDir),
+				await anchoredPaths(
+					this.vitest,
+					repo,
+					cacheDir,
+					this.provider.dependencies,
+				),
 			),
 		}
 		const file = snapshotPath(this.vitest, cacheDir)

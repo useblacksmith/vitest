@@ -73,6 +73,11 @@ export function lockfilePaths(
 	).then((known) => [...known].sort())
 }
 
+/** Every path git would show for the worktree: tracked and untracked, not ignored. */
+export function knownPaths(repo: string): Promise<Set<string>> {
+	return listKnown(repo, ['.'], false)
+}
+
 /**
  * Paths git would show for the pathspecs: tracked files still on disk and
  * untracked files not ignored, so a directory's listing is what `git status`

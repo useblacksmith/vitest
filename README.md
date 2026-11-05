@@ -36,11 +36,12 @@ The plugin uses Vitest's dependency tracking: each run records which modules and
 | `shadow` | `false` | Run every test, but log what the affected selection would have run and which failed files it would have skipped. Use it to evaluate the plugin on a repo before relying on the selection. |
 | `disableCache` | `false` | Do not store the dependency record in the Actions cache. |
 | `cachePrefix` | `'blacksmith-vitest'` | First segment of the cache key; change it to discard every existing entry. |
+| `dependencies` | `{}` | Dependencies the tracking cannot see, as globs of test files mapped to the glob(s) of the files they depend on, relative to the config root: `{ 'tests/**/*.spec.ts': 'fixtures/**' }`. A change to a matching file reruns the mapped tests. |
 | `allowCustomShards` | `false` | Shards must be stable for maximal efficacy, which the plugin handles by default. Set this to `true` to use a custom sharding strategy (`test.sequence.sequencer`). |
 
 ## Caveats
 
-- **Only reads made by the test process are tracked.** Imports and `fs` reads from the tests themselves are; reads from a child process, `globalSetup`, or browser-mode projects are not. List such inputs in Vitest's `forceRerunTriggers` so a change to them runs everything.
+- **Only dependencies in the test process are tracked.** `import`, `require`, and `fs` are automatically tracked. Files read from a child process, `globalSetup`, or outside of node are not; declare them with the `dependencies` option.
 
 ## Development
 
