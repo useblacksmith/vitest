@@ -15,7 +15,10 @@ permissions:
 
 jobs:
   publish:
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    # GitHub-hosted on purpose: npm generates provenance attestations only on
+    # GitHub-hosted runners (RUNNER_ENVIRONMENT=github-hosted) and refuses
+    # otherwise. CI (ci.yml) stays on Blacksmith.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:

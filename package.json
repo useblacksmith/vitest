@@ -3,6 +3,11 @@
 	"version": "0.2.0",
 	"description": "Reports Vitest test results to Blacksmith and runs only the tests affected since the last run",
 	"type": "module",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/useblacksmith/vitest.git"
+	},
+	"license": "MIT",
 	"exports": {
 		".": {
 			"types": "./dist/index.d.ts",
