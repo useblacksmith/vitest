@@ -57,13 +57,3 @@ npm run check:types
 npm run build          # dist/ (not committed; built on publish)
 npm test               # runs the fixtures under test/ with a fake backend
 ```
-
-## Releasing
-
-Bump `version` in `package.json`, then push the matching tag (`git tag v0.2.1 && git push origin v0.2.1`). The release workflow stages the version on npm (`npm stage publish`, with provenance); a maintainer reviews and releases it:
-
-```sh
-npm stage list @useblacksmith/vitest   # pending versions and their ids
-npm stage approve <id>                 # 2FA prompt; publishes the staged version
-npm stage reject <id>                  # drops it; the version number can be staged again
-```
