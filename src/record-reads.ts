@@ -118,17 +118,24 @@ function instrument(args: unknown[]): Child {
 				? fileURLToPath(options.cwd)
 				: process.cwd()
 	const file = recordFile()
-	const env = {
-		...((options.env as Record<string, string | undefined> | undefined) ??
-			process.env),
+	const given = options.env as Record<string, string | undefined> | undefined
+	const env = { ...(given ?? process.env) }
+	// `env: { ...process.env, NODE_OPTIONS: undefined }` asks for a child free
+	// of node options; such a child is left alone and contributes only its
+	// command line.
+	const cleared =
+		given !== undefined &&
+		Object.prototype.hasOwnProperty.call(given, 'NODE_OPTIONS') &&
+		given.NODE_OPTIONS === undefined
+	if (!cleared) {
+		env[CHILD_RECORD_ENV] = file
+		env.NODE_OPTIONS = [
+			env.NODE_OPTIONS,
+			`--import ${pathToFileURL(recordChild).href}`,
+		]
+			.filter(Boolean)
+			.join(' ')
 	}
-	env[CHILD_RECORD_ENV] = file
-	env.NODE_OPTIONS = [
-		env.NODE_OPTIONS,
-		`--import ${pathToFileURL(recordChild).href}`,
-	]
-		.filter(Boolean)
-		.join(' ')
 	options.env = env
 	const words = [
 		...(typeof args[0] === 'string' ? args[0].split(/\s+/) : []),

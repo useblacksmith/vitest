@@ -63,7 +63,7 @@ The plugin uses Vitest's dependency tracking: each run records which modules and
 
 ## Caveats
 
-- **Only dependencies the test reaches through node are tracked.** `import`, `require`, and `fs` are tracked automatically, in the test process and in every node process it spawns through `child_process` (the child gets a preloaded recorder; its own children inherit it). For any child, the command and the arguments that name files are recorded too. Files read by `globalSetup`, by non-node programs, or build outputs a child runs in place of their sources are not; declare them with the `dependencies` option.
+- **Only dependencies the test reaches through node are tracked.** `import`, `require`, and `fs` are tracked automatically, in the test process and in every node process it spawns through `child_process` (the child gets a preloaded recorder; its own children inherit it). For any child, the command and the arguments that name files are recorded too. A child spawned with `env: { ..., NODE_OPTIONS: undefined }` gets no recorder, only its command line. Files read by `globalSetup`, by non-node programs, or build outputs a child runs in place of their sources are not; declare them with the `dependencies` option.
 - **Shards must be stable for maximal efficacy.** The plugin assigns test files to shards by a hash of their path, so a file stays in its shard as others are added or removed. A custom `test.sequence.sequencer` is honoured, but every test that moves to another shard reruns there.
 
 ## Development

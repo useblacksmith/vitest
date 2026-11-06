@@ -38,7 +38,7 @@ if (output) {
 			},
 		})
 	}
-	process.on('exit', () => {
+	process.on('exit', function blacksmithRecordChild() {
 		const script = process.argv[1]
 		if (script) record(script)
 		for (const id of Object.keys(require.cache)) record(id)
