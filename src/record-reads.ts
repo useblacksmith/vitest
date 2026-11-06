@@ -200,16 +200,22 @@ function wrapChildProcess(name: string, sync: boolean): void {
 	// `promisify(execFile)` must go through the wrapper to reach the child.
 	if (promisify.custom in original) {
 		Object.defineProperty(wrapped, promisify.custom, {
-			value: (...args: unknown[]) =>
-				new Promise((resolve, reject) => {
-					wrapped(
+			value: (...args: unknown[]) => {
+				let child: unknown
+				const promise = new Promise((resolve, reject) => {
+					child = wrapped(
 						...args,
 						(error: Error | null, stdout: unknown, stderr: unknown) =>
 							error
 								? reject(Object.assign(error, { stdout, stderr }))
 								: resolve({ stdout, stderr }),
 					)
-				}),
+				})
+				return Object.defineProperty(promise, 'child', {
+					value: child,
+					enumerable: true,
+				})
+			},
 		})
 	}
 	copyProperties(wrapped, original)
