@@ -21,7 +21,8 @@
 		"build": "tsc -p tsconfig.build.json",
 		"prepack": "npm run build",
 		"check:types": "tsc --noEmit",
-		"test": "vitest run"
+		"test": "vitest run",
+		"release": "scripts/release.sh"
 	},
 	"peerDependencies": {
 		"vitest": ">=5.1.0"
