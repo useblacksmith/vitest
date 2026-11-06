@@ -2,6 +2,7 @@ import { createRequire, syncBuiltinESMExports } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { promisify } from 'node:util'
 
 import {
 	BRAND,
@@ -195,6 +196,22 @@ function wrapChildProcess(name: string, sync: boolean): void {
 				}
 				return process
 			}
+	// Node's own promisified `exec`/`execFile` call the unwrapped function;
+	// `promisify(execFile)` must go through the wrapper to reach the child.
+	if (promisify.custom in original) {
+		Object.defineProperty(wrapped, promisify.custom, {
+			value: (...args: unknown[]) =>
+				new Promise((resolve, reject) => {
+					wrapped(
+						...args,
+						(error: Error | null, stdout: unknown, stderr: unknown) =>
+							error
+								? reject(Object.assign(error, { stdout, stderr }))
+								: resolve({ stdout, stderr }),
+					)
+				}),
+		})
+	}
 	copyProperties(wrapped, original)
 	Object.defineProperty(wrapped, BRAND, { value: true })
 	target[name] = wrapped

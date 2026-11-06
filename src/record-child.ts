@@ -1,4 +1,4 @@
-import { createRequire } from 'node:module'
+import { createRequire, syncBuiltinESMExports } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -24,6 +24,9 @@ if (output) {
 		if (!isIgnored(absolute)) paths.add(absolute)
 	}
 	wrapReads(fs, record)
+	// A loader preloaded before this one (tsx) may already hold the ESM
+	// namespace of `node:fs`; resync so its named imports see the wrappers.
+	syncBuiltinESMExports()
 	// Node 22.15+: every ESM and CJS resolution, including through loaders such as tsx.
 	if (typeof nodeModule.registerHooks === 'function') {
 		nodeModule.registerHooks({
