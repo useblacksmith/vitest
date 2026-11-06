@@ -135,6 +135,11 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 					)
 				}
 			}
+			// Coverage follows the selection (vitest's `config.related`) rather
+			// than asking the provider again with a `changedSince` it ignores.
+			if (!options.shadow && vitest.config.changed && supportsChanged(vitest)) {
+				vitest.config.coverage.changed = false
+			}
 			// Per project, since a project's own `setupFiles` replace the root's;
 			// first, so reads by those setup files are recorded too. A browser
 			// project has no `node:fs` to wrap.

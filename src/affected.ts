@@ -301,6 +301,10 @@ export class TreeSnapshotProvider implements VCSProvider {
 			(message) => this.vitest.logger.log(`[blacksmith] ${message}`),
 		)
 		if (selected === null) {
+			// Not a changed run any more: vitest's coverage provider narrows its
+			// report to `config.related`, which is about to be every test file,
+			// and no source file is a test file.
+			this.vitest.config.changed = false
 			return dependencies.map((dependency) => dependency.file)
 		}
 		const changed = new Set(selected)

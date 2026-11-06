@@ -408,6 +408,60 @@ describe('--changed against the tree snapshot', () => {
 	})
 })
 
+describe('coverage', () => {
+	let repo: Repo
+	beforeAll(() => {
+		repo = new Repo('coverage')
+	})
+	const COVERAGE = [
+		'--coverage',
+		'--coverage.include=src/lib/**',
+		'--coverage.reporter=json-summary',
+	]
+
+	/** The source files the last run's coverage summary reports on. */
+	function covered(): string[] {
+		const summary = JSON.parse(
+			readFileSync(
+				path.join(repo.cwd, 'coverage', 'coverage-summary.json'),
+				'utf8',
+			),
+		) as Record<string, unknown>
+		return Object.keys(summary)
+			.filter((key) => key !== 'total')
+			.map((file) => path.relative(repo.cwd, file))
+			.sort()
+	}
+
+	test('a run with no snapshot under --changed reports coverage for everything it ran', async () => {
+		const run = await repo.run('--changed', ...COVERAGE)
+		expect(run.exitCode, run.output).toBe(0)
+		expect(run.ran).toEqual([...TESTS].sort())
+		expect(covered()).toEqual(['src/lib/a.ts', 'src/lib/b.ts'])
+	})
+
+	test('so does a lockfile change under the plugin-applied selection', async () => {
+		repo.env = { BLACKSMITH_CHANGED: '1' }
+		repo.write(
+			'package-lock.json',
+			'{ "name": "fixture-affected", "lockfileVersion": 3, "x": 1 }\n',
+		)
+		repo.commit('bump lock')
+		const run = await repo.run(...COVERAGE)
+		expect(run.exitCode, run.output).toBe(0)
+		expect(run.ran).toEqual([...TESTS].sort())
+		expect(covered()).toEqual(['src/lib/a.ts', 'src/lib/b.ts'])
+	})
+
+	test('a selection reports coverage for the changed files', async () => {
+		repo.write('src/lib/b.ts', "export const b = 'b' // changed\n")
+		const run = await repo.run(...COVERAGE)
+		expect(run.exitCode, run.output).toBe(0)
+		expect(run.ran).toEqual(['three', 'two'])
+		expect(covered()).toEqual(['src/lib/b.ts'])
+	})
+})
+
 describe('sharding', () => {
 	let repo: Repo
 	beforeAll(() => {
