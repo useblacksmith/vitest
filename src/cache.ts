@@ -32,15 +32,17 @@ export const DEFAULT_CACHE_PREFIX = 'blacksmith-vitest'
 
 export function cacheKey(input: {
 	snapshotVersion: number
+	/** Vitest's root relative to the repository: each package of a monorepo keeps its own entries. */
+	root: string
 	projects: string[]
 	shard: { index: number; count: number } | null
 	head: string
 }): CacheKey {
 	const scope = [
 		`v${input.snapshotVersion}`,
-		input.projects.some(Boolean)
+		input.root !== '' || input.projects.some(Boolean)
 			? createHash('sha1')
-					.update(input.projects.join('\n'))
+					.update([input.root, ...input.projects].join('\n'))
 					.digest('hex')
 					.slice(0, 12)
 			: 'all',

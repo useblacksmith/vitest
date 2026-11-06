@@ -32,7 +32,7 @@ import { shardOwner } from './sequencer.js'
 export const SNAPSHOT_FILE = 'blacksmith.json'
 // Bumped whenever the snapshot's shape changes or the records an anchor
 // vouches for gain a kind of dependency, so an older snapshot is not trusted.
-const SNAPSHOT_VERSION = 4
+const SNAPSHOT_VERSION = 5
 
 /** A `dependencies` entry, compiled: test files matching `tests` depend on files matching `deps`; both root-relative. */
 export interface DependencyRule {
@@ -72,6 +72,8 @@ export interface Shard {
 export interface Snapshot {
 	version: typeof SNAPSHOT_VERSION
 	head: string
+	/** Vitest's root relative to the repository, so one package's snapshot never vouches for another's. */
+	root: string
 	shard: Shard | null
 	/** Names of the projects the run covered (`--project` narrows them). */
 	projects: string[]
@@ -229,14 +231,13 @@ async function readSnapshot(file: string): Promise<Snapshot | null> {
 		return null
 	}
 	if (typeof parsed !== 'object' || parsed === null) return null
-	const { version, head, shard, projects, tree, tests } = parsed as Record<
-		string,
-		unknown
-	>
+	const { version, head, root, shard, projects, tree, tests } =
+		parsed as Record<string, unknown>
 	const covered = BloomFilter.parse(tests)
 	if (
 		version !== SNAPSHOT_VERSION ||
 		typeof head !== 'string' ||
+		typeof root !== 'string' ||
 		!isShard(shard) ||
 		!Array.isArray(projects) ||
 		!projects.every((name) => typeof name === 'string') ||
@@ -248,6 +249,7 @@ async function readSnapshot(file: string): Promise<Snapshot | null> {
 	return {
 		version: SNAPSHOT_VERSION,
 		head,
+		root,
 		shard,
 		projects: projects as string[],
 		tree,
@@ -336,6 +338,14 @@ export class TreeSnapshotProvider implements VCSProvider {
 			)
 			return null
 		}
+		const repo = await repoRoot(root)
+		const here = repoRelative(repo, this.vitest.config.root)
+		if (snapshot.root !== here) {
+			log(
+				`dependency snapshot is for ${snapshot.root || 'the repository root'}, this run is for ${here || 'the repository root'}, running every test of the ${describeShard(shard)}`,
+			)
+			return null
+		}
 		if (!sameShard(snapshot.shard, shard)) {
 			log(
 				`dependency snapshot is for ${describeShard(snapshot.shard)}, running every test of the ${describeShard(shard)}`,
@@ -350,7 +360,6 @@ export class TreeSnapshotProvider implements VCSProvider {
 			return null
 		}
 
-		const repo = await repoRoot(root)
 		const tree = await anchorTree(
 			repo,
 			await anchoredPaths(this.vitest, repo, dir, this.dependencies),
@@ -463,6 +472,7 @@ export class ShadowAnalysis {
 		const repo = await repoRoot(vitest.config.root)
 		const key = cacheKey({
 			snapshotVersion: SNAPSHOT_VERSION,
+			root: repoRelative(repo, vitest.config.root),
 			projects: projectNames(vitest),
 			shard: vitest.config.shard ?? null,
 			head: process.env.GITHUB_SHA || (await headSha(repo)),
@@ -679,6 +689,7 @@ export class SnapshotRecorder implements Reporter {
 		const snapshot: Snapshot = {
 			version: SNAPSHOT_VERSION,
 			head: await headSha(repo),
+			root: repoRelative(repo, root),
 			shard: shard ?? null,
 			projects: projectNames(this.vitest),
 			tree: await anchorTree(
@@ -706,6 +717,7 @@ export class SnapshotRecorder implements Reporter {
 		if (!base) return
 		const key = cacheKey({
 			snapshotVersion: snapshot.version,
+			root: snapshot.root,
 			projects: snapshot.projects,
 			shard: snapshot.shard,
 			head: snapshot.head,
@@ -776,6 +788,7 @@ export async function restoreDependencyCache(vitest: Vitest): Promise<void> {
 	const repo = await repoRoot(vitest.config.root)
 	const key = cacheKey({
 		snapshotVersion: SNAPSHOT_VERSION,
+		root: repoRelative(repo, vitest.config.root),
 		projects: projectNames(vitest),
 		shard: vitest.config.shard ?? null,
 		head: process.env.GITHUB_SHA || (await headSha(repo)),

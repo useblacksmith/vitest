@@ -39,24 +39,39 @@ interface Run {
 }
 
 class Repo {
+	/** The git repository. */
 	readonly dir: string
+	/** Where vitest runs: `dir`, or a package below it when `nest` is given. */
+	readonly cwd: string
 	private runs = 0
 
-	constructor(name: string, fixture = 'fixture-affected') {
+	constructor(name: string, fixture = 'fixture-affected', nest = '') {
 		this.dir = path.join(
 			packageRoot,
 			'test',
 			`fixture-runs-${name}-${process.pid}`,
 		)
+		this.cwd = path.join(this.dir, nest)
 		rmSync(this.dir, { recursive: true, force: true })
-		cpSync(path.join(packageRoot, 'test', fixture), this.dir, {
+		cpSync(path.join(packageRoot, 'test', fixture), this.cwd, {
 			recursive: true,
 		})
 		// The reporter tests run the fixtures in place and leave vitest's cache behind.
-		rmSync(path.join(this.dir, 'node_modules'), {
+		rmSync(path.join(this.cwd, 'node_modules'), {
 			recursive: true,
 			force: true,
 		})
+		if (nest !== '') {
+			// The fixture config imports the plugin relative to test/<fixture>.
+			const config = path.join(this.cwd, 'vitest.config.ts')
+			writeFileSync(
+				config,
+				readFileSync(config, 'utf8').replaceAll(
+					"'../../src/",
+					`'${path.join(packageRoot, 'src')}/`,
+				),
+			)
+		}
 		this.git('init', '-q', '-b', 'main')
 		this.git('config', 'user.email', 'ci@example.com')
 		this.git('config', 'user.name', 'ci')
@@ -74,14 +89,14 @@ class Repo {
 	}
 
 	write(file: string, content: string): void {
-		const target = path.join(this.dir, file)
+		const target = path.join(this.cwd, file)
 		mkdirSync(path.dirname(target), { recursive: true })
 		writeFileSync(target, content)
 	}
 
 	/** The snapshot file for the full run, or the one whose name carries `key` for a `--project` run. */
 	private snapshotFile(key = ''): string | null {
-		const cacheDir = path.join(this.dir, 'node_modules', '.vite', 'vitest')
+		const cacheDir = path.join(this.cwd, 'node_modules', '.vite', 'vitest')
 		if (!existsSync(cacheDir)) return null
 		const files = readdirSync(cacheDir, {
 			recursive: true,
@@ -115,7 +130,7 @@ class Repo {
 	env: Record<string, string> = {}
 
 	run(...args: string[]): Promise<Run> {
-		const results = path.join(this.dir, `results-${this.runs++}.json`)
+		const results = path.join(this.cwd, `results-${this.runs++}.json`)
 		return new Promise((resolve, reject) => {
 			const child = spawn(
 				process.execPath,
@@ -127,7 +142,7 @@ class Repo {
 					...args,
 				],
 				{
-					cwd: this.dir,
+					cwd: this.cwd,
 					env: {
 						PATH: process.env.PATH ?? '',
 						HOME: process.env.HOME ?? '',
@@ -172,8 +187,9 @@ describe('--changed against the tree snapshot', () => {
 		expect(first.exitCode, first.output).toBe(0)
 		expect(first.ran).toEqual([...TESTS].sort())
 		expect(repo.snapshot()).toMatchObject({
-			version: 4,
+			version: 5,
 			head: repo.git('rev-parse', 'HEAD').trim(),
+			root: '',
 			shard: null,
 			tree: { 'src/lib/a.ts': expect.any(String) },
 		})
@@ -686,7 +702,7 @@ describe('the dependency record travels through the Actions cache', () => {
 		const first = await producer.run()
 		expect(first.exitCode, first.output).toBe(0)
 		expect(first.output).toContain(
-			'saved dependency cache blacksmith-vitest-v4-all-1of1-',
+			'saved dependency cache blacksmith-vitest-v5-all-1of1-',
 		)
 		expect([...cache.entries.values()].filter((e) => e.final)).toHaveLength(1)
 
@@ -695,7 +711,7 @@ describe('the dependency record travels through the Actions cache', () => {
 		const restored = await consumer.run('--changed')
 		expect(restored.exitCode, restored.output).toBe(0)
 		expect(restored.output).toContain(
-			'restored dependency cache blacksmith-vitest-v4-all-1of1-',
+			'restored dependency cache blacksmith-vitest-v5-all-1of1-',
 		)
 		expect(restored.ran).toEqual([])
 
@@ -722,7 +738,7 @@ describe('the dependency record travels through the Actions cache', () => {
 		expect(clean.exitCode, clean.output).toBe(0)
 		expect(clean.ran).toEqual([...TESTS].sort())
 		expect(clean.output).toMatch(
-			/shadow: would have run 0 of \d+ test files \(0 files changed since [0-9a-f]{12}, from blacksmith-vitest-v4-all-1of1-/,
+			/shadow: would have run 0 of \d+ test files \(0 files changed since [0-9a-f]{12}, from blacksmith-vitest-v5-all-1of1-/,
 		)
 		expect(clean.output).not.toContain('restored dependency cache')
 		expect(clean.output).toContain('saved dependency cache')
@@ -904,6 +920,52 @@ describe('the dependency record travels through the Actions cache', () => {
 		const run = await repo.run()
 		expect(run.exitCode, run.output).toBe(0)
 		expect(run.output).not.toContain('dependency cache')
+	})
+})
+
+describe('packages of one repository keep separate caches', () => {
+	let cache: Awaited<ReturnType<typeof fakeCacheService>>
+	beforeEach(async () => {
+		cache = await fakeCacheService()
+	})
+	afterEach(() => cache.server.close())
+
+	test("a package never restores the repository root's bundle, only its own", async () => {
+		const root = new Repo('cache-root')
+		root.env = { ACTIONS_RESULTS_URL: cache.url }
+		expect((await root.run()).exitCode).toBe(0)
+		expect(root.snapshot()?.root).toBe('')
+
+		const nested = new Repo('cache-nested', 'fixture-affected', 'packages/a')
+		nested.env = { ACTIONS_RESULTS_URL: cache.url }
+		const first = await nested.run('--changed')
+		expect(first.exitCode, first.output).toBe(0)
+		expect(first.output).not.toContain('restored dependency cache')
+		expect(first.ran).toEqual([...TESTS].sort())
+		expect(nested.snapshot()?.root).toBe('packages/a')
+		const keys = [...cache.entries]
+			.filter(([, entry]) => entry.final)
+			.map(([key]) => key.split('-').slice(0, 4).join('-'))
+		expect(keys).toHaveLength(2)
+		expect(new Set(keys).size).toBe(2)
+
+		const again = new Repo('cache-nested-2', 'fixture-affected', 'packages/a')
+		again.env = { ACTIONS_RESULTS_URL: cache.url }
+		const restored = await again.run('--changed')
+		expect(restored.exitCode, restored.output).toBe(0)
+		expect(restored.output).toContain('restored dependency cache')
+		expect(restored.ran).toEqual([])
+	})
+
+	test("a snapshot written for another package's root runs everything", async () => {
+		const repo = new Repo('root-mismatch')
+		expect((await repo.run()).exitCode).toBe(0)
+		repo.patchSnapshot({ root: 'packages/b' })
+		const run = await repo.run('--changed')
+		expect(run.output).toContain(
+			'dependency snapshot is for packages/b, this run is for the repository root',
+		)
+		expect(run.ran).toEqual([...TESTS].sort())
 	})
 })
 
