@@ -271,3 +271,34 @@ export function diffTrees(before: Tree, after: Tree): string[] {
 	}
 	return changed
 }
+
+/**
+ * The blob sha each of `paths` had at `commit`, for those that were tracked
+ * there; `null` when the commit is not in this clone. A path holding a newline
+ * cannot be named on a `cat-file` line and is left out.
+ */
+export async function blobsAt(
+	repo: string,
+	commit: string,
+	paths: readonly string[],
+): Promise<Map<string, string> | null> {
+	const named = paths.filter((file) => !file.includes('\n'))
+	if (named.length === 0) return new Map()
+	let output: string
+	try {
+		output = await git(
+			repo,
+			['cat-file', '--batch-check=%(objectname) %(objecttype) %(rest)'],
+			named.map((file) => `${commit}:${file} ${file}\n`).join(''),
+		)
+	} catch {
+		return null
+	}
+	const result = new Map<string, string>()
+	for (const line of output.split('\n')) {
+		if (line === '' || line.includes(' missing')) continue
+		const [sha, type, ...rest] = line.split(' ')
+		if (type === 'blob' && sha) result.set(rest.join(' '), sha)
+	}
+	return result
+}

@@ -1376,6 +1376,33 @@ describe('hygiene: lockfiles, dependency globs and record growth', () => {
 		expect((await repo.run('--changed')).ran).toEqual(['mapped'])
 	})
 
+	test('files other runs recorded after a shard snapshot are not changes; a manifest created since still is', async () => {
+		const repo = new Repo('shard-growth')
+		const owned = TESTS.filter(
+			(name) => shardFor(`src/${name}.test.ts`, 2) === 0,
+		).sort()
+		expect((await repo.run('--shard=1/2')).ran).toEqual(owned)
+		// The unsharded run records the other shard's tests and anchors the
+		// package.json above them; shard 1's snapshot never saw those paths.
+		expect((await repo.run()).exitCode).toBe(0)
+		const same = await repo.run('--changed', '--shard=1/2')
+		// Only src/generated/value.json can count: git-ignored, it has no blob at
+		// the snapshot's commit to compare with. Its test is shard 2's.
+		expect(same.output).toMatch(/\[blacksmith\] [01] files changed/)
+		expect(same.ran).toEqual([])
+		// A manifest that did not exist at the snapshot's commit is a change
+		// for every test with a recorded file below it.
+		repo.write('src/lib/package.json', '{ "type": "module" }\n')
+		expect((await repo.run()).exitCode).toBe(0)
+		const manifest = await repo.run('--changed', '--shard=1/2')
+		expect(manifest.output).toContain(
+			'1 files changed since',
+		)
+		expect(manifest.output).toContain('1 test files under a changed manifest')
+		// Vitest's own resolver reruns the rest on a new package.json; ours selected one.test.ts.
+		expect(manifest.ran).toContain('one')
+	})
+
 	test('the record drops modules outside the repository and tests that no longer exist', async () => {
 		const repo = new Repo('prune')
 		await repo.run()

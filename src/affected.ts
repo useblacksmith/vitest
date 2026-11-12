@@ -25,6 +25,7 @@ import type {
 
 import {
 	anchorTree,
+	blobsAt,
 	diffTrees,
 	headSha,
 	knownPaths,
@@ -444,6 +445,31 @@ export class TreeSnapshotProvider implements VCSProvider {
 	/** The plugin's `dependencies` option, compiled. */
 	dependencies: DependencyRule[] = []
 
+	/**
+	 * Paths whose content differs from the snapshot's. A path the snapshot did
+	 * not anchor (a later run recorded it, or a file it imported was recorded
+	 * after another shard's run) is a change only if it was not tracked with
+	 * the same blob at the snapshot's commit.
+	 */
+	private async changedSince(
+		repo: string,
+		snapshot: Snapshot,
+		tree: Tree,
+	): Promise<string[]> {
+		const changed = diffTrees(snapshot.tree, tree)
+		const fresh = changed.filter(
+			(file) => !Object.hasOwn(snapshot.tree, file) && Object.hasOwn(tree, file),
+		)
+		if (fresh.length === 0) return changed
+		const blobs = await blobsAt(repo, snapshot.head, fresh)
+		if (!blobs) return changed
+		return changed.filter((file) => {
+			const entry = tree[file]
+			const sha = entry?.split(' ')[1]
+			return !(blobs.has(file) && blobs.get(file) === sha)
+		})
+	}
+
 	async findChangedFiles(options: VCSProviderOptions): Promise<string[]> {
 		this.deselected = new Set()
 		const dependencies = await options.resolver.getDependencies()
@@ -528,7 +554,7 @@ export class TreeSnapshotProvider implements VCSProvider {
 			repo,
 			await anchoredPaths(this.vitest, repo, dir, this.dependencies),
 		)
-		const changedPaths = diffTrees(snapshot.tree, tree)
+		const changedPaths = await this.changedSince(repo, snapshot, tree)
 		const owns = await shardOwner(this.vitest)
 		// Entries without a record are test files vitest has never seen; a test
 		// the snapshot does not vouch for has no trustworthy record either,
