@@ -25,7 +25,7 @@ import {
 
 import { SNAPSHOT_FILE, type Snapshot } from '../src/affected.ts'
 import { runtimeId } from '../src/cache.ts'
-import { anchorTree, diffTrees } from '../src/git.ts'
+import { anchorTree, blobsAt, diffTrees } from '../src/git.ts'
 import { shardFor } from '../src/sequencer.ts'
 import { packageRoot } from './harness.ts'
 
@@ -1438,5 +1438,29 @@ describe('hygiene: lockfiles, dependency globs and record growth', () => {
 			one.deps.slice(0, -1).map((index) => project.modules[index]),
 		)
 		expect((await repo.run('--changed')).ran).toEqual([])
+	})
+})
+
+describe('blobsAt', () => {
+	test('names a path with spaces, skips one with a newline, and reports missing ones as absent', async () => {
+		const repo = new Repo('blobs')
+		repo.write('src/with space/a blob.txt', 'x\n')
+		repo.write('src/plain.txt', 'y\n')
+		repo.commit('spaced')
+		const head = repo.git('rev-parse', 'HEAD').trim()
+		const sha = (file: string) => repo.git('rev-parse', `${head}:${file}`).trim()
+		expect(
+			await blobsAt(repo.dir, head, [
+				'src/with space/a blob.txt',
+				'src/plain.txt',
+				'src/missing.txt',
+				'src/new\nline.txt',
+			]),
+		).toEqual(
+			new Map([
+				['src/with space/a blob.txt', sha('src/with space/a blob.txt')],
+				['src/plain.txt', sha('src/plain.txt')],
+			]),
+		)
 	})
 })

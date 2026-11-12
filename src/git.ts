@@ -274,8 +274,9 @@ export function diffTrees(before: Tree, after: Tree): string[] {
 
 /**
  * The blob sha each of `paths` had at `commit`, for those that were tracked
- * there; `null` when the commit is not in this clone. A path holding a newline
- * cannot be named on a `cat-file` line and is left out.
+ * there; `null` when git cannot answer. `cat-file` replies one line per request
+ * in order, so a path is matched by position and may hold spaces; one holding
+ * a newline cannot be requested and is left out.
  */
 export async function blobsAt(
 	repo: string,
@@ -288,17 +289,19 @@ export async function blobsAt(
 	try {
 		output = await git(
 			repo,
-			['cat-file', '--batch-check=%(objectname) %(objecttype) %(rest)'],
-			named.map((file) => `${commit}:${file} ${file}\n`).join(''),
+			['cat-file', '--batch-check=%(objectname) %(objecttype)'],
+			named.map((file) => `${commit}:${file}\n`).join(''),
 		)
 	} catch {
 		return null
 	}
+	const lines = output.split('\n')
 	const result = new Map<string, string>()
-	for (const line of output.split('\n')) {
-		if (line === '' || line.includes(' missing')) continue
-		const [sha, type, ...rest] = line.split(' ')
-		if (type === 'blob' && sha) result.set(rest.join(' '), sha)
-	}
+	named.forEach((file, index) => {
+		const line = lines[index] ?? ''
+		if (line.endsWith(' missing')) return
+		const [sha, type] = line.split(' ')
+		if (type === 'blob' && sha) result.set(file, sha)
+	})
 	return result
 }
