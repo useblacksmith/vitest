@@ -40,6 +40,8 @@ const TESTS = [
 	'mapped',
 	'child',
 	'child-async',
+	'child-killed',
+	'worker',
 ]
 
 interface Run {
@@ -246,6 +248,22 @@ describe('--changed against the tree snapshot', () => {
 			const dirty = await repo.run('--changed')
 			expect(dirty.exitCode, dirty.output).toBe(0)
 			expect(dirty.ran, file).toEqual(['child', 'child-async'])
+			repo.commit(`edit ${file}`)
+		}
+		expect((await repo.run('--changed')).ran).toEqual([])
+	})
+
+	test('a child the test kills and a worker thread it terminates still record what they loaded', async () => {
+		const edits: [string, string[]][] = [
+			['src/scripts/child-server-lib.mjs', ['child-killed']],
+			['src/scripts/worker-lib.mjs', ['worker']],
+			['src/fixtures/worker/data.txt', ['worker']],
+		]
+		for (const [file, expected] of edits) {
+			repo.write(file, `${readFileSync(path.join(repo.cwd, file), 'utf8')}// edited\n`)
+			const dirty = await repo.run('--changed')
+			expect(dirty.exitCode, dirty.output).toBe(0)
+			expect(dirty.ran, file).toEqual(expected)
 			repo.commit(`edit ${file}`)
 		}
 		expect((await repo.run('--changed')).ran).toEqual([])

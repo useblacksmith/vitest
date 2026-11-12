@@ -4,6 +4,8 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 
+import { afterAll } from 'vitest'
+
 import {
 	BRAND,
 	CHILD_RECORD_ENV,
@@ -15,8 +17,9 @@ import {
 /**
  * Runs as the first setup file of every test file. Vitest records what a
  * test imports; this records the files it reads through `node:fs` and the
- * node processes it spawns (their modules and reads, via `record-child`),
- * adding each to the dependency set vitest keeps per test file.
+ * node processes and worker threads it starts (their modules and reads, via
+ * `record-child`), adding each to the dependency set vitest keeps per test
+ * file.
  *
  * The functions on the builtin are replaced, so every specifier that reaches
  * them (`fs`, `node:fs`, `fs/promises`, `require`) is covered.
@@ -25,6 +28,8 @@ const require = createRequire(import.meta.url)
 const fs = require('node:fs') as typeof import('node:fs')
 const childProcess =
 	require('node:child_process') as typeof import('node:child_process')
+const workerThreads =
+	require('node:worker_threads') as typeof import('node:worker_threads')
 
 // Unwrapped, so this module's own file handling records nothing.
 const {
@@ -82,6 +87,51 @@ function recordFile(): string {
 	return path.join(recordDir, `${process.pid}-${spawned++}.txt`)
 }
 
+type Env = Record<string, string | undefined>
+
+/**
+ * `given` (the call's `env`, or the parent's when it had none) with the
+ * recorder preloaded and a file to report to; `null` when the caller asked
+ * for a child free of node options with `env: { ...process.env, NODE_OPTIONS:
+ * undefined }`, which is left alone.
+ */
+function recordedEnv(
+	given: Env | undefined,
+): { env: Env; file: string } | null {
+	const cleared =
+		given !== undefined &&
+		Object.prototype.hasOwnProperty.call(given, 'NODE_OPTIONS') &&
+		given.NODE_OPTIONS === undefined
+	if (cleared) return null
+	const env: Env = { ...(given ?? process.env) }
+	const file = recordFile()
+	env[CHILD_RECORD_ENV] = file
+	env.NODE_OPTIONS = [
+		env.NODE_OPTIONS,
+		`--import ${pathToFileURL(recordChild).href}`,
+	]
+		.filter(Boolean)
+		.join(' ')
+	return { env, file }
+}
+
+interface Child {
+	/** The record file the child was given, `null` when nothing is being recorded. */
+	file: string | null
+	cwd: string
+	/** Its test file has finished: what it reports from now on belongs to no test. */
+	detached: boolean
+}
+
+/** Children of the current test file that have not exited yet. */
+const outstanding = new Set<Child>()
+
+function startChild(file: string | null, cwd: string): Child {
+	const child: Child = { file, cwd, detached: false }
+	if (file !== null) outstanding.add(child)
+	return child
+}
+
 /** The options object of a `child_process` call, inserted when the call had none. */
 function optionsOf(args: unknown[]): Record<string, unknown> {
 	let index = args.findIndex(
@@ -97,12 +147,6 @@ function optionsOf(args: unknown[]): Record<string, unknown> {
 	return options
 }
 
-interface Child {
-	/** The record file the child was given, `null` when nothing is being recorded. */
-	file: string | null
-	cwd: string
-}
-
 /**
  * Prepares a `child_process` call: the child gets the recorder preloaded and
  * a file to report to, and the command plus every argument naming a file is
@@ -110,7 +154,7 @@ interface Child {
  * binary) can contribute.
  */
 function instrument(args: unknown[]): Child {
-	if (!dependencies()) return { file: null, cwd: process.cwd() }
+	if (!dependencies()) return startChild(null, process.cwd())
 	const options = optionsOf(args)
 	const cwd =
 		typeof options.cwd === 'string'
@@ -118,26 +162,8 @@ function instrument(args: unknown[]): Child {
 			: options.cwd instanceof URL
 				? fileURLToPath(options.cwd)
 				: process.cwd()
-	const file = recordFile()
-	const given = options.env as Record<string, string | undefined> | undefined
-	const env = { ...(given ?? process.env) }
-	// `env: { ...process.env, NODE_OPTIONS: undefined }` asks for a child free
-	// of node options; such a child is left alone and contributes only its
-	// command line.
-	const cleared =
-		given !== undefined &&
-		Object.prototype.hasOwnProperty.call(given, 'NODE_OPTIONS') &&
-		given.NODE_OPTIONS === undefined
-	if (!cleared) {
-		env[CHILD_RECORD_ENV] = file
-		env.NODE_OPTIONS = [
-			env.NODE_OPTIONS,
-			`--import ${pathToFileURL(recordChild).href}`,
-		]
-			.filter(Boolean)
-			.join(' ')
-	}
-	options.env = env
+	const recorded = recordedEnv(options.env as Env | undefined)
+	if (recorded) options.env = recorded.env
 	const words = [
 		...(typeof args[0] === 'string' ? args[0].split(/\s+/) : []),
 		...(Array.isArray(args[1]) ? args[1] : []),
@@ -149,24 +175,41 @@ function instrument(args: unknown[]): Child {
 			if (exists(candidate) && stat(candidate).isFile()) record(candidate)
 		} catch {}
 	}
-	return { file, cwd }
+	return startChild(recorded?.file ?? null, cwd)
 }
 
-/** Records what the exited child reported, relative to its working directory. */
-function collect({ file, cwd }: Child): void {
-	if (file === null) return
+/** What the child has reported so far, relative to its working directory. */
+function recordReported(child: Child): void {
+	if (child.file === null || child.detached) return
 	let reported: string
 	try {
-		reported = read(file, 'utf8')
+		reported = read(child.file, 'utf8')
 	} catch {
 		return
-	} finally {
-		try {
-			unlink(file)
-		} catch {}
 	}
-	for (const line of reported.split('\n')) if (line !== '') record(line, cwd)
+	for (const line of reported.split('\n')) if (line !== '') record(line, child.cwd)
 }
+
+/** Records what the exited child reported and forgets it. */
+function collect(child: Child): void {
+	if (child.file === null) return
+	recordReported(child)
+	try {
+		unlink(child.file)
+	} catch {}
+	outstanding.delete(child)
+}
+
+// Vitest ships the test file's dependency set as soon as its hooks are done,
+// so a child still running then (a server the test tears down, a worker it
+// never joins) reports what it has loaded so far here and nothing afterwards.
+afterAll(() => {
+	for (const child of outstanding) {
+		recordReported(child)
+		child.detached = true
+	}
+	outstanding.clear()
+})
 
 type Wrappable = Record<string, unknown>
 
@@ -229,6 +272,57 @@ for (const name of ['spawn', 'exec', 'execFile', 'fork']) {
 for (const name of ['spawnSync', 'execSync', 'execFileSync']) {
 	wrapChildProcess(name, true)
 }
+
+/**
+ * A worker thread has its own `fs` builtin and module registry, so it is
+ * recorded like a child: the preload comes through its `env` (`NODE_OPTIONS`
+ * is read from there), and the script it runs is recorded right away. A
+ * worker sharing the parent's environment (`env: SHARE_ENV`) contributes
+ * only its script.
+ */
+function wrapWorker(): void {
+	const target = workerThreads as unknown as Wrappable
+	const Original = workerThreads.Worker
+	if (BRAND in Original) return
+	type WorkerOptions = import('node:worker_threads').WorkerOptions
+	class RecordedWorker extends Original {
+		constructor(filename: string | URL, options?: WorkerOptions) {
+			let child: Child = { file: null, cwd: process.cwd(), detached: false }
+			if (dependencies()) {
+				const script =
+					options?.eval === true
+						? null
+						: filename instanceof URL
+							? filename.protocol === 'file:'
+								? fileURLToPath(filename)
+								: null
+							: filename.startsWith('data:') || filename.startsWith('node:')
+								? null
+								: filename
+				if (script !== null) record(script)
+				const given = options?.env
+				if (given !== workerThreads.SHARE_ENV) {
+					const recorded = recordedEnv(given as Env | undefined)
+					if (recorded) {
+						options = { ...options, env: recorded.env }
+						child = startChild(recorded.file, process.cwd())
+					}
+				}
+			}
+			super(filename, options)
+			if (child.file !== null) {
+				const done = () => collect(child)
+				this.once('exit', done)
+				this.once('error', done)
+			}
+		}
+	}
+	copyProperties(RecordedWorker, Original)
+	Object.defineProperty(RecordedWorker, BRAND, { value: true })
+	target.Worker = RecordedWorker
+}
+
+wrapWorker()
 
 // `import { readFileSync } from 'node:fs'` binds the builtin's ESM namespace,
 // which only sees the wrapped functions once the namespace is resynced; the
