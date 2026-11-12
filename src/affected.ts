@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import picomatch from 'picomatch'
 
+import { recordBrowserDependencies } from './browser.js'
 import {
 	cacheKey,
 	ENV_CACHE_URL,
@@ -895,6 +896,10 @@ export class SnapshotRecorder implements Reporter {
 		this.partial =
 			specifications.some(isPartialSpecification) ||
 			(this.vitest.config.tagsFilter?.length ?? 0) > 0
+	}
+
+	onTestModuleEnd(module: TestModule): void {
+		recordBrowserDependencies(this.vitest, module)
 	}
 
 	async onTestRunEnd(
