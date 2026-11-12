@@ -2,6 +2,8 @@ import { fileURLToPath } from 'node:url'
 
 import type { Plugin } from 'vitest/config'
 import type { Vitest } from 'vitest/node'
+import { ENV_REPO } from './fs-recorder.js'
+import { repoRoot } from './git.js'
 
 import {
 	compileDependencies,
@@ -69,7 +71,6 @@ function supportsChanged(vitest: Vitest): boolean {
 
 export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 	const provider = new TreeSnapshotProvider()
-	provider.dependencies = compileDependencies(options.dependencies)
 	let changedApplied = false
 	let restored: Promise<void> | undefined
 	let shadow: ShadowAnalysis | undefined
@@ -97,7 +98,15 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 			// second plugin instance; configure the provider vitest actually uses.
 			const active = configuredProvider(vitest) ?? provider
 			active.vitest = vitest
+			provider.dependencies = compileDependencies(
+				options.dependencies,
+				vitest.config.root,
+			)
 			active.dependencies = provider.dependencies
+			// Workers drop what they read outside the repository: the anchor
+			// cannot cover it, and vitest's record would otherwise keep every
+			// temp file a run touched.
+			process.env[ENV_REPO] ??= await repoRoot(vitest.config.root)
 			// Their sequencer's shards must not depend on which tests the
 			// selection kept, or the provider's view of the shard and vitest's
 			// would differ.
