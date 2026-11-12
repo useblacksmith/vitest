@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import picomatch from 'picomatch'
 
-import { BloomFilter } from './bloom.js'
 import { cacheKey, ENV_CACHE_URL, restoreBundle, saveBundle } from './cache.js'
 
 import type {
@@ -32,7 +31,7 @@ import { shardOwner } from './sequencer.js'
 export const SNAPSHOT_FILE = 'blacksmith.json'
 // Bumped whenever the snapshot's shape changes or the records an anchor
 // vouches for gain a kind of dependency, so an older snapshot is not trusted.
-const SNAPSHOT_VERSION = 5
+const SNAPSHOT_VERSION = 6
 
 /** A `dependencies` entry, compiled: test files matching `tests` depend on files matching `deps`; both root-relative. */
 export interface DependencyRule {
@@ -78,8 +77,8 @@ export interface Snapshot {
 	/** Names of the projects the run covered (`--project` narrows them). */
 	projects: string[]
 	tree: Tree
-	/** Repo-relative test files the run covered: ran, or deselected by our provider as unchanged. A test outside this set reruns whatever its record says. */
-	tests: BloomFilter
+	/** Repo-relative test files the run vouches for, sorted: passed, or deselected by our provider as unchanged. A test outside this set (never run, failed, interrupted) reruns whatever its record says. */
+	tests: string[]
 }
 
 const LOCKFILES = new Set([
@@ -233,7 +232,6 @@ async function readSnapshot(file: string): Promise<Snapshot | null> {
 	if (typeof parsed !== 'object' || parsed === null) return null
 	const { version, head, root, shard, projects, tree, tests } =
 		parsed as Record<string, unknown>
-	const covered = BloomFilter.parse(tests)
 	if (
 		version !== SNAPSHOT_VERSION ||
 		typeof head !== 'string' ||
@@ -242,7 +240,8 @@ async function readSnapshot(file: string): Promise<Snapshot | null> {
 		!Array.isArray(projects) ||
 		!projects.every((name) => typeof name === 'string') ||
 		!isTree(tree) ||
-		covered === null
+		!Array.isArray(tests) ||
+		!tests.every((file) => typeof file === 'string')
 	) {
 		return null
 	}
@@ -253,7 +252,7 @@ async function readSnapshot(file: string): Promise<Snapshot | null> {
 		shard,
 		projects: projects as string[],
 		tree,
-		tests: covered,
+		tests: tests as string[],
 	}
 }
 
@@ -381,9 +380,10 @@ export class TreeSnapshotProvider implements VCSProvider {
 				)
 				.map((dependency) => dependency.file),
 		)
+		const vouched = new Set(snapshot.tests)
 		for (const specification of await this.vitest.globTestSpecifications()) {
 			const file = specification.moduleId
-			if (owns(file) && !snapshot.tests.has(repoRelative(repo, file))) {
+			if (owns(file) && !vouched.has(repoRelative(repo, file))) {
 				uncovered.add(file)
 			}
 		}
@@ -690,12 +690,19 @@ export class SnapshotRecorder implements Reporter {
 		reason: TestRunEndReason,
 	): Promise<void> {
 		await this.reportShadow(modules)
-		// Vitest reports `passed` from the modules alone; an unhandled error
-		// still fails the run, and a test file with `.only` skipped its siblings.
-		if (reason !== 'passed' || errors.length > 0) return
+		// A failed run still vouches for the files that passed; the failed ones
+		// are left out and rerun next time. An interrupted run left files unrun,
+		// an unhandled error fails the run outside any module (`reason` does not
+		// see it), and a `.only` skipped its siblings: none of those vouch.
+		if (reason === 'interrupted' || errors.length > 0) return
 		if (modules.some((module) => containsOnly(module))) return
-		const covered = await this.coveredTests()
+		const covered = await this.coveredTests(modules)
 		if (covered === null) return
+		if (covered.left.length > 0) {
+			this.vitest.logger.log(
+				`[blacksmith] ${covered.left.length} failed test files left out of the dependency snapshot, they run again next time`,
+			)
+		}
 		const cacheDir = this.vitest.vite.config.cacheDir
 		const { root, shard } = this.vitest.config
 		const repo = await repoRoot(root)
@@ -714,7 +721,7 @@ export class SnapshotRecorder implements Reporter {
 					this.provider.dependencies,
 				),
 			),
-			tests: BloomFilter.from(covered.map((file) => repoRelative(repo, file))),
+			tests: covered.vouched.map((file) => repoRelative(repo, file)).sort(),
 		}
 		const file = snapshotPath(this.vitest, cacheDir)
 		await mkdir(path.dirname(file), { recursive: true })
@@ -753,8 +760,14 @@ export class SnapshotRecorder implements Reporter {
 		}
 	}
 
-	/** The tests this shard owns, when every one of them ran or was deselected by our own provider; `null` when the run covered less. */
-	private async coveredTests(): Promise<string[] | null> {
+	/**
+	 * The tests this shard owns, split into those the run vouches for (passed,
+	 * or deselected by our own provider) and those `left` out (failed, or never
+	 * reached); `null` when the run covered less than the shard.
+	 */
+	private async coveredTests(
+		modules: ReadonlyArray<TestModule>,
+	): Promise<{ vouched: string[]; left: string[] } | null> {
 		if (this.partial || this.vitest.getGlobalTestNamePattern() !== undefined) {
 			return null
 		}
@@ -769,9 +782,29 @@ export class SnapshotRecorder implements Reporter {
 		]
 		// Nothing owned (an `include` matching no file) vouches for nothing.
 		if (owned.length === 0) return null
-		return owned.every((file) => this.started.has(file) || deselected.has(file))
-			? owned
-			: null
+		if (!owned.every((file) => this.started.has(file) || deselected.has(file)))
+			return null
+		// A file may run in several projects; it passed when every one did.
+		const passed = new Map<string, boolean>()
+		for (const module of modules) {
+			const state = module.state()
+			const fine =
+				(state === 'passed' || state === 'skipped') &&
+				module.errors().length === 0
+			passed.set(module.moduleId, (passed.get(module.moduleId) ?? true) && fine)
+		}
+		const vouched: string[] = []
+		const left: string[] = []
+		// Vitest reruns a deselected file when its config or globalSetup changed;
+		// one that ran is judged by its result, deselection vouches only for
+		// files that did not run.
+		for (const file of owned) {
+			const fine = this.started.has(file)
+				? passed.get(file) === true
+				: deselected.has(file)
+			;(fine ? vouched : left).push(file)
+		}
+		return { vouched, left }
 	}
 }
 

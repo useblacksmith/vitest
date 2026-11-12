@@ -87,6 +87,7 @@ async function listKnown(
 	repo: string,
 	pathspecs: string[],
 	literal = true,
+	ignored = false,
 ): Promise<Set<string>> {
 	const known = new Set<string>()
 	const gone = new Set<string>()
@@ -99,7 +100,7 @@ async function listKnown(
 			'--cached',
 			'--others',
 			'--deleted',
-			'--exclude-standard',
+			...(ignored ? [] : ['--exclude-standard']),
 			'--',
 			...pathspecs.slice(i, i + 500),
 		])
@@ -182,7 +183,9 @@ export async function anchorTree(
 	for (const [file, stat] of present)
 		(stat.isDirectory() ? dirs : others).push(file)
 	const known = await listKnown(repo, dirs)
-	for (const file of await listKnown(repo, others)) known.add(file)
+	// A recorded file counts even when git ignores it: generated code and
+	// `.env.local` are inputs the test read, whatever `.gitignore` says.
+	for (const file of await listKnown(repo, others, true, true)) known.add(file)
 	const sorted = [...known].sort()
 	const files: string[] = []
 	const modes: string[] = []
