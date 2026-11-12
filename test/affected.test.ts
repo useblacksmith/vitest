@@ -766,6 +766,50 @@ describe('worker threads', () => {
 	})
 })
 
+describe('installed under node_modules', () => {
+	let repo: Repo
+	beforeAll(() => {
+		repo = new Repo('installed')
+		// The built package, with a vitest of its own beside it: what pnpm
+		// gives a workspace package whose peer set differs from the plugin's.
+		const installed = path.join(
+			repo.cwd,
+			'node_modules',
+			'@useblacksmith',
+			'vitest',
+		)
+		cpSync(path.join(packageRoot, 'dist'), path.join(installed, 'dist'), {
+			recursive: true,
+		})
+		cpSync(
+			path.join(packageRoot, 'package.json'),
+			path.join(installed, 'package.json'),
+		)
+		cpSync(
+			path.join(packageRoot, 'node_modules', 'vitest'),
+			path.join(installed, 'node_modules', 'vitest'),
+			{ recursive: true, dereference: true },
+		)
+		const config = path.join(repo.cwd, 'vitest.config.ts')
+		writeFileSync(
+			config,
+			readFileSync(config, 'utf8').replace(
+				"'../../src/index.ts'",
+				"'@useblacksmith/vitest'",
+			),
+		)
+	})
+
+	test('the setup file registers with the vitest running the tests and still records reads', async () => {
+		const first = await repo.run()
+		expect(first.exitCode, first.output).toBe(0)
+		expect(first.output).not.toContain('failed to find the current suite')
+		expect(first.ran).toEqual([...TESTS].sort())
+		repo.write('src/fixtures/five/data.json', '{ "value": "five", "n": 2 }\n')
+		expect((await repo.run('--changed')).ran).toEqual(['five'])
+	})
+})
+
 describe('git-ignored inputs', () => {
 	test('a change to a generated file the test read reruns it', async () => {
 		const repo = new Repo('ignored')
