@@ -772,15 +772,25 @@ describe('installed under node_modules', () => {
 		repo = new Repo('installed')
 		// The built package, with a vitest of its own beside it: what pnpm
 		// gives a workspace package whose peer set differs from the plugin's.
+		// Built here rather than copied from dist/, which `npm test` alone
+		// (release.yml) never produces.
 		const installed = path.join(
 			repo.cwd,
 			'node_modules',
 			'@useblacksmith',
 			'vitest',
 		)
-		cpSync(path.join(packageRoot, 'dist'), path.join(installed, 'dist'), {
-			recursive: true,
-		})
+		execFileSync(
+			process.execPath,
+			[
+				path.join(packageRoot, 'node_modules', 'typescript', 'bin', 'tsc'),
+				'-p',
+				'tsconfig.build.json',
+				'--outDir',
+				path.join(installed, 'dist'),
+			],
+			{ cwd: packageRoot, stdio: 'inherit' },
+		)
 		cpSync(
 			path.join(packageRoot, 'package.json'),
 			path.join(installed, 'package.json'),
