@@ -24,7 +24,6 @@ import {
 } from 'vitest'
 
 import { SNAPSHOT_FILE, type Snapshot } from '../src/affected.ts'
-import { BloomFilter } from '../src/bloom.ts'
 import { anchorTree, diffTrees } from '../src/git.ts'
 import { shardFor } from '../src/sequencer.ts'
 import { packageRoot } from './harness.ts'
@@ -44,6 +43,7 @@ const TESTS = [
 	'child-killed',
 	'worker',
 	'unhandled',
+	'generated',
 ]
 
 interface Run {
@@ -202,7 +202,7 @@ describe('--changed against the tree snapshot', () => {
 		expect(first.exitCode, first.output).toBe(0)
 		expect(first.ran).toEqual([...TESTS].sort())
 		expect(repo.snapshot()).toMatchObject({
-			version: 5,
+			version: 6,
 			head: repo.git('rev-parse', 'HEAD').trim(),
 			root: '',
 			shard: null,
@@ -406,6 +406,10 @@ describe('--changed against the tree snapshot', () => {
 			'src/fixtures/five/moved.json',
 			'src/fixtures/five/data.json',
 		)
+		// Moved back, but the failed run did not vouch for five: it runs once more.
+		const restored = await repo.run('--changed')
+		expect(restored.ran).toEqual(['five'])
+		expect(restored.exitCode, restored.output).toBe(0)
 		expect((await repo.run('--changed')).ran).toEqual([])
 	})
 
@@ -415,6 +419,9 @@ describe('--changed against the tree snapshot', () => {
 		expect(renamed.ran).toEqual(['six'])
 		expect(renamed.exitCode).toBe(1)
 		repo.git('mv', 'src/fixtures/seven', 'src/fixtures/six')
+		const restored = await repo.run('--changed')
+		expect(restored.ran).toEqual(['six'])
+		expect(restored.exitCode, restored.output).toBe(0)
 		expect((await repo.run('--changed')).ran).toEqual([])
 	})
 
@@ -555,11 +562,13 @@ describe('sharding', () => {
 
 	test('a test the snapshot does not vouch for reruns even with its dependencies unchanged', async () => {
 		await repo.run('--shard=1/2')
-		expect(repo.snapshot()?.tests).toMatchObject({ m: expect.any(Number) })
+		expect(repo.snapshot()?.tests).toEqual(
+			owned(1, 2)
+				.map((name) => `src/${name}.test.ts`)
+				.sort(),
+		)
 		const [moved, ...rest] = owned(1, 2)
-		repo.patchSnapshot({
-			tests: BloomFilter.from(rest.map((name) => `src/${name}.test.ts`)),
-		})
+		repo.patchSnapshot({ tests: rest.map((name) => `src/${name}.test.ts`) })
 		const run = await repo.run('--changed', '--shard=1/2')
 		expect(run.output).toContain('0 files changed')
 		expect(run.output).toContain('1 test files not covered by it')
@@ -599,7 +608,7 @@ describe('snapshot is only written by runs that cover the shard', () => {
 		expect((await repo.run('--changed')).ran).toEqual(['three', 'two'])
 	})
 
-	test('a failing run does not advance it', async () => {
+	test('a failing run vouches for the files that passed; the failed ones rerun', async () => {
 		const before = repo.snapshot()
 		repo.write(
 			'src/lib/a.ts',
@@ -608,9 +617,28 @@ describe('snapshot is only written by runs that cover the shard', () => {
 		const failing = await repo.run('--changed')
 		expect(failing.exitCode).toBe(1)
 		expect(failing.ran).toEqual(['one', 'two'])
-		expect(repo.snapshot()).toEqual(before)
-		expect((await repo.run('--changed')).ran).toEqual(['one', 'two'])
+		expect(failing.output).toContain(
+			'2 failed test files left out of the dependency snapshot',
+		)
+		const after = repo.snapshot()
+		expect(after?.tree['src/lib/a.ts']).not.toBe(before?.tree['src/lib/a.ts'])
+		expect(after?.tests).toEqual(
+			TESTS.filter((name) => !['one', 'two'].includes(name))
+				.map((name) => `src/${name}.test.ts`)
+				.sort(),
+		)
+		// Nothing changed since, but the failed files are not vouched for.
+		const again = await repo.run('--changed')
+		expect(again.exitCode).toBe(1)
+		expect(again.ran).toEqual(['one', 'two'])
 		repo.write('src/lib/a.ts', "export const a = 'a'\n")
+		const fixed = await repo.run('--changed')
+		expect(fixed.exitCode, fixed.output).toBe(0)
+		expect(fixed.ran).toEqual(['one', 'two'])
+		expect(repo.snapshot()?.tests).toEqual(
+			[...TESTS].map((name) => `src/${name}.test.ts`).sort(),
+		)
+		expect((await repo.run('--changed')).ran).toEqual([])
 	})
 
 	test('a corrupt snapshot file runs everything', async () => {
@@ -722,6 +750,24 @@ describe('worker threads', () => {
 		// Without the preload, only the script itself is known.
 		repo.write('src/scripts/worker-script.mjs', `${readFileSync(path.join(repo.cwd, 'src/scripts/worker-script.mjs'), 'utf8')}// edited\n`)
 		expect((await repo.run('--changed')).ran).toEqual(['worker'])
+	})
+})
+
+describe('git-ignored inputs', () => {
+	test('a change to a generated file the test read reruns it', async () => {
+		const repo = new Repo('ignored')
+		expect(repo.git('check-ignore', 'src/generated/value.json').trim()).toBe(
+			'src/generated/value.json',
+		)
+		await repo.run()
+		expect(repo.snapshot()?.tree['src/generated/value.json']).toMatch(
+			/^100644 [0-9a-f]{40}$/,
+		)
+		expect((await repo.run('--changed')).ran).toEqual([])
+		repo.write('src/generated/value.json', '{ "value": "regenerated" }\n')
+		const run = await repo.run('--changed')
+		expect(run.ran).toEqual(['generated'])
+		expect(run.exitCode).toBe(1)
 	})
 })
 
@@ -901,7 +947,7 @@ describe('the dependency record travels through the Actions cache', () => {
 		const first = await producer.run()
 		expect(first.exitCode, first.output).toBe(0)
 		expect(first.output).toContain(
-			'saved dependency cache blacksmith-vitest-v5-all-1of1-',
+			'saved dependency cache blacksmith-vitest-v6-all-1of1-',
 		)
 		expect([...cache.entries.values()].filter((e) => e.final)).toHaveLength(1)
 
@@ -910,7 +956,7 @@ describe('the dependency record travels through the Actions cache', () => {
 		const restored = await consumer.run('--changed')
 		expect(restored.exitCode, restored.output).toBe(0)
 		expect(restored.output).toContain(
-			'restored dependency cache blacksmith-vitest-v5-all-1of1-',
+			'restored dependency cache blacksmith-vitest-v6-all-1of1-',
 		)
 		expect(restored.ran).toEqual([])
 
@@ -937,7 +983,7 @@ describe('the dependency record travels through the Actions cache', () => {
 		expect(clean.exitCode, clean.output).toBe(0)
 		expect(clean.ran).toEqual([...TESTS].sort())
 		expect(clean.output).toMatch(
-			/shadow: would have run 0 of \d+ test files \(0 files changed since [0-9a-f]{12}, from blacksmith-vitest-v5-all-1of1-/,
+			/shadow: would have run 0 of \d+ test files \(0 files changed since [0-9a-f]{12}, from blacksmith-vitest-v6-all-1of1-/,
 		)
 		expect(clean.output).not.toContain('restored dependency cache')
 		expect(clean.output).toContain('saved dependency cache')

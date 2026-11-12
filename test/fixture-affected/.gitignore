@@ -1,1 +1,3 @@
 node_modules/
+# Stands in for generated code: an input git ignores.
+src/generated/
