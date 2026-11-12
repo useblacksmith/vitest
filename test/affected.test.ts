@@ -120,9 +120,10 @@ class Repo {
 			encoding: 'utf8',
 		}).filter((file) =>
 			key === ''
-				? path.basename(file) === SNAPSHOT_FILE
-				: /^blacksmith\.[0-9a-f]{12}\.json$/.test(path.basename(file)) &&
-					readFileSync(path.join(cacheDir, file), 'utf8').includes(key),
+				? /^blacksmith(\.\d+of\d+)?\.json$/.test(path.basename(file))
+				: /^blacksmith(\.[0-9a-f]{12})?(\.\d+of\d+)?\.json$/.test(
+						path.basename(file),
+					) && readFileSync(path.join(cacheDir, file), 'utf8').includes(key),
 		)
 		if (files.length !== 1) return null
 		return path.join(cacheDir, files[0] ?? '')
@@ -134,8 +135,8 @@ class Repo {
 	}
 
 	/** Overwrites fields of the stored snapshot, standing in for a snapshot another run produced. */
-	patchSnapshot(patch: Record<string, unknown>): void {
-		const file = this.snapshotFile()
+	patchSnapshot(patch: Record<string, unknown>, key = ''): void {
+		const file = this.snapshotFile(key)
 		if (!file) throw new Error('no snapshot to patch')
 		const stored = JSON.parse(readFileSync(file, 'utf8')) as Record<
 			string,
@@ -527,6 +528,8 @@ describe('sharding', () => {
 		repo = new Repo('shard')
 	})
 
+	const SHARD_1_OF_2 = '"shard":{"index":1,"count":2}'
+	const SHARD_2_OF_2 = '"shard":{"index":2,"count":2}'
 	const owned = (index: number, count: number) =>
 		TESTS.filter(
 			(name) => shardFor(`src/${name}.test.ts`, count) === index - 1,
@@ -538,19 +541,24 @@ describe('sharding', () => {
 		expect(one.ran).toEqual(owned(1, 2))
 		expect(two.ran).toEqual(owned(2, 2))
 		expect([...one.ran, ...two.ran].sort()).toEqual([...TESTS].sort())
-		expect(repo.snapshot()?.shard).toEqual({ index: 2, count: 2 })
+		expect(repo.snapshot(SHARD_1_OF_2)?.shard).toEqual({ index: 1, count: 2 })
+		expect(repo.snapshot(SHARD_2_OF_2)?.shard).toEqual({ index: 2, count: 2 })
 	})
 
-	test("another shard's snapshot is not trusted", async () => {
+	test("each shard keeps its own snapshot; another shard's is never read", async () => {
+		expect((await repo.run('--changed', '--shard=1/2')).ran).toEqual([])
+		expect((await repo.run('--changed', '--shard=2/2')).ran).toEqual([])
+		const third = await repo.run('--changed', '--shard=1/3')
+		expect(third.output).toContain('no dependency snapshot')
+		expect(third.ran).toEqual(owned(1, 3))
+		// An unsharded run beside them leaves the shards' snapshots alone.
+		expect((await repo.run()).exitCode).toBe(0)
+		expect((await repo.run('--changed', '--shard=1/2')).ran).toEqual([])
+		// A shard's snapshot stored under another shard's name is still refused.
+		repo.patchSnapshot({ shard: { index: 2, count: 2 } }, SHARD_1_OF_2)
 		const other = await repo.run('--changed', '--shard=1/2')
 		expect(other.ran).toEqual(owned(1, 2))
 		expect(other.output).toContain('snapshot is for shard 2/2')
-		expect(repo.snapshot()?.shard).toEqual({ index: 1, count: 2 })
-
-		expect((await repo.run('--changed', '--shard=1/2')).ran).toEqual([])
-		expect((await repo.run('--changed', '--shard=1/3')).output).toContain(
-			'snapshot is for shard 1/2',
-		)
 	})
 
 	test('a changed dependency only reruns dependents the shard owns', async () => {
@@ -564,13 +572,16 @@ describe('sharding', () => {
 
 	test('a test the snapshot does not vouch for reruns even with its dependencies unchanged', async () => {
 		await repo.run('--shard=1/2')
-		expect(repo.snapshot()?.tests).toEqual(
+		expect(repo.snapshot(SHARD_1_OF_2)?.tests).toEqual(
 			owned(1, 2)
 				.map((name) => `src/${name}.test.ts`)
 				.sort(),
 		)
 		const [moved, ...rest] = owned(1, 2)
-		repo.patchSnapshot({ tests: rest.map((name) => `src/${name}.test.ts`) })
+		repo.patchSnapshot(
+			{ tests: rest.map((name) => `src/${name}.test.ts`) },
+			SHARD_1_OF_2,
+		)
 		const run = await repo.run('--changed', '--shard=1/2')
 		expect(run.output).toContain('0 files changed')
 		expect(run.output).toContain('1 test files not covered by it')
@@ -1323,5 +1334,82 @@ describe('identity: runtime, manifests and the workflow file', () => {
 		const run = await repo.run('--changed')
 		expect(run.ran).toEqual([...TESTS].sort())
 		expect(run.output).toContain('.github/workflows/ci.yml changed, running every test')
+	})
+})
+
+describe('hygiene: lockfiles, dependency globs and record growth', () => {
+	test('a lockfile with no recorded file below it is not anchored', async () => {
+		const repo = new Repo('vendored-lockfile')
+		repo.write('vendor/reference/package-lock.json', '{ "lockfileVersion": 3 }\n')
+		repo.commit('vendored repo')
+		await repo.run()
+		const tree = repo.snapshot()?.tree ?? {}
+		expect(Object.keys(tree)).toContain('package-lock.json')
+		expect(Object.keys(tree)).not.toContain('vendor/reference/package-lock.json')
+		repo.write('vendor/reference/package-lock.json', '{ "lockfileVersion": 2 }\n')
+		expect((await repo.run('--changed')).ran).toEqual([])
+		repo.write('package-lock.json', '{ "lockfileVersion": 3, "touched": true }\n')
+		const all = await repo.run('--changed')
+		expect(all.ran).toEqual([...TESTS].sort())
+		expect(all.output).toContain('package-lock.json changed, running every test')
+	})
+
+	test('a dependencies glob written from the root through `..` matches, and one matching nothing warns', async () => {
+		const repo = new Repo('globs')
+		const config = readFileSync(path.join(repo.cwd, 'vitest.config.ts'), 'utf8')
+		repo.write(
+			'vitest.config.ts',
+			config.replace(
+				"dependencies: { 'src/mapped.test.ts': 'mapped/**' },",
+				`dependencies: { 'src/mapped.test.ts': '../${path.basename(repo.dir)}/mapped/**', 'src/nothing.test.ts': 'nowhere/**' },`,
+			),
+		)
+		repo.commit('globs')
+		const first = await repo.run()
+		expect(first.exitCode, first.output).toBe(0)
+		expect(first.output).toContain(
+			'dependencies["src/nothing.test.ts"] matches no file in the repository',
+		)
+		expect(first.output).not.toContain('dependencies["src/mapped.test.ts"]')
+		expect(Object.keys(repo.snapshot()?.tree ?? {})).toContain('mapped/data.txt')
+		repo.write('mapped/data.txt', 'changed\n')
+		expect((await repo.run('--changed')).ran).toEqual(['mapped'])
+	})
+
+	test('the record drops modules outside the repository and tests that no longer exist', async () => {
+		const repo = new Repo('prune')
+		await repo.run()
+		const cacheDir = path.join(repo.cwd, 'node_modules', '.vite', 'vitest')
+		const [found] = readdirSync(cacheDir, { recursive: true, encoding: 'utf8' })
+			.filter((entry) => path.basename(entry) === 'dependencies.json')
+		if (!found) throw new Error('no dependencies.json recorded')
+		const file = path.join(cacheDir, found)
+		const records = JSON.parse(readFileSync(file, 'utf8')) as {
+			projects: Record<
+				string,
+				{ modules: string[]; files: Record<string, { deps: number[]; at?: number }> }
+			>
+		}
+		const project = Object.values(records.projects)[0]
+		if (!project) throw new Error('no project recorded')
+		const before = project.modules.length
+		expect(project.modules.some((module) => module.startsWith('..'))).toBe(false)
+		const outside = project.modules.push('../elsewhere/tmp.txt') - 1
+		project.files['src/gone.test.ts'] = { deps: [outside], at: Date.now() }
+		const one = project.files['src/one.test.ts']
+		if (!one) throw new Error('one.test.ts not recorded')
+		one.deps.push(outside)
+		writeFileSync(file, JSON.stringify(records))
+		await repo.run()
+		const after = (JSON.parse(readFileSync(file, 'utf8')) as typeof records).projects
+		const pruned = Object.values(after)[0]
+		if (!pruned) throw new Error('no project recorded')
+		expect(pruned.modules.length).toBe(before)
+		expect(pruned.modules.some((module) => module.startsWith('..'))).toBe(false)
+		expect(pruned.files['src/gone.test.ts']).toBeUndefined()
+		expect(pruned.files['src/one.test.ts']?.deps.map((index) => pruned.modules[index])).toEqual(
+			one.deps.slice(0, -1).map((index) => project.modules[index]),
+		)
+		expect((await repo.run('--changed')).ran).toEqual([])
 	})
 })

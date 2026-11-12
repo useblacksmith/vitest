@@ -19,7 +19,7 @@ export const BUNDLE_VERSION = 'blacksmith-vitest-bundle-1'
 export const TIMEOUT_MS = 15_000
 /** Files under the cache dir that travel in the bundle. */
 export const RECORD_FILE =
-	/^(dependencies\.json|blacksmith(\.[0-9a-f]{12})?\.json)$/
+	/^(dependencies\.json|blacksmith(\.[0-9a-f]{12})?(\.\d+of\d+)?\.json)$/
 
 export interface CacheKey {
 	/** Exact key for this tree; also the save key. */

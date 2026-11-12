@@ -41,17 +41,36 @@ const SNAPSHOT_VERSION = 6
 
 /** A `dependencies` entry, compiled: test files matching `tests` depend on files matching `deps`; both root-relative. */
 export interface DependencyRule {
+	/** The `tests` glob as written, for messages. */
+	source: string
 	tests: (file: string) => boolean
 	deps: (file: string) => boolean
+}
+
+/**
+ * A glob written as a path from the root (`../../packages/*\/package.json`
+ * from `packages/a`) in the form candidates take, `../*\/package.json`:
+ * `path.relative` folds the `..` segments the same way for both.
+ */
+function normalizeGlob(root: string, glob: string): string {
+	if (!/^\.\.?\//.test(glob)) return glob
+	return rootRelative(root, path.resolve(root, glob))
 }
 
 export function compileDependencies(
 	dependencies:
 		Readonly<Record<string, string | readonly string[]>> | undefined,
+	root: string,
 ): DependencyRule[] {
 	return Object.entries(dependencies ?? {}).map(([tests, deps]) => ({
-		tests: picomatch(tests, { dot: true }),
-		deps: picomatch(typeof deps === 'string' ? deps : [...deps], { dot: true }),
+		source: tests,
+		tests: picomatch(normalizeGlob(root, tests), { dot: true }),
+		deps: picomatch(
+			(typeof deps === 'string' ? [deps] : [...deps]).map((glob) =>
+				normalizeGlob(root, glob),
+			),
+			{ dot: true },
+		),
 	}))
 }
 
@@ -144,18 +163,23 @@ function projectNames(vitest: Vitest): string[] {
 }
 
 /**
- * `blacksmith.json`, or `blacksmith.<hash>.json` when `--project` narrowed the
- * run: invocations covering different project sets keep separate anchors.
+ * `blacksmith.json`, or `blacksmith[.<hash>][.<i>of<n>].json` when `--project`
+ * narrowed the run or `--shard` split it: invocations covering different
+ * project sets or shards keep separate anchors, as their cache keys do.
  */
 export function snapshotPath(vitest: Vitest, dir: string): string {
-	const filtered = vitest.config.project.length > 0
-	const name = filtered
-		? SNAPSHOT_FILE.replace(
-				'.json',
-				`.${createHash('sha1').update(projectNames(vitest).join('\n')).digest('hex').slice(0, 12)}.json`,
-			)
-		: SNAPSHOT_FILE
-	return path.join(dir, name)
+	const parts = [SNAPSHOT_FILE.replace('.json', '')]
+	if (vitest.config.project.length > 0) {
+		parts.push(
+			createHash('sha1')
+				.update(projectNames(vitest).join('\n'))
+				.digest('hex')
+				.slice(0, 12),
+		)
+	}
+	const { shard } = vitest.config
+	if (shard) parts.push(`${shard.index}of${shard.count}`)
+	return path.join(dir, `${parts.join('.')}.json`)
 }
 
 interface DependencyRecord {
@@ -226,7 +250,7 @@ async function anchoredPaths(
 	dir: string,
 	rules: readonly DependencyRule[],
 ): Promise<string[]> {
-	const paths = new Set(await lockfilePaths(repo, LOCKFILES))
+	const paths = new Set<string>()
 	const workflow = workflowPath()
 	if (workflow) paths.add(workflow)
 	const records = await readRecords(vitest, dir)
@@ -242,12 +266,88 @@ async function anchoredPaths(
 			for (const dir of ancestors(repoDir(relative))) dirs.add(dir)
 		}
 	}
+	// A lockfile pins what the tests below it resolve; a vendored repo's or a
+	// fixture's lockfile pins nothing a test loads.
+	for (const file of await lockfilePaths(repo, LOCKFILES)) {
+		if (dirs.has(repoDir(file))) paths.add(file)
+	}
+	const matched = rules.map(() => 0)
 	for (const file of await knownPaths(repo)) {
 		const fromRoot = rootRelative(vitest.config.root, path.join(repo, file))
-		if (rules.some((rule) => rule.deps(fromRoot))) paths.add(file)
+		let byRule = false
+		rules.forEach((rule, index) => {
+			if (!rule.deps(fromRoot)) return
+			matched[index] = (matched[index] ?? 0) + 1
+			byRule = true
+		})
+		if (byRule) paths.add(file)
 		else if (isManifest(file) && dirs.has(repoDir(file))) paths.add(file)
 	}
+	rules.forEach((rule, index) => {
+		if (matched[index] === 0) {
+			vitest.logger.warn(
+				`[blacksmith] dependencies["${rule.source}"] matches no file in the repository; globs are relative to ${vitest.config.root}`,
+			)
+		}
+	})
 	return [...paths]
+}
+
+/**
+ * Rewrites vitest's `dependencies.json` without the modules outside the
+ * repository (the anchor cannot cover them) and without tests that no longer
+ * exist, renumbering what the remaining records point to. Vitest only ever
+ * appends, so a record otherwise grows by every temp file a run touched.
+ */
+async function pruneRecords(
+	vitest: Vitest,
+	repo: string,
+	dir: string,
+): Promise<void> {
+	const records = await readRecords(vitest, dir)
+	if (!records) return
+	const root = vitest.config.root
+	for (const project of Object.values(records.projects ?? {})) {
+		const keep = new Map<number, number>()
+		const modules: string[] = []
+		const renumber = (record: DependencyRecord): void => {
+			record.deps = [
+				...new Set(
+					record.deps.flatMap((index) => {
+						const module = project.modules[index]
+						if (module === undefined) return []
+						const absolute = path.resolve(root, module)
+						if (
+							repoRelative(repo, absolute).startsWith('..') ||
+							path.isAbsolute(repoRelative(repo, absolute))
+						) {
+							return []
+						}
+						let next = keep.get(index)
+						if (next === undefined) {
+							next = modules.push(module) - 1
+							keep.set(index, next)
+						}
+						return [next]
+					}),
+				),
+			]
+		}
+		for (const [test, record] of Object.entries(project.files)) {
+			if (!existsSync(path.resolve(root, test))) {
+				delete project.files[test]
+				continue
+			}
+			renumber(record)
+		}
+		if (project.config) renumber(project.config)
+		if (project.globalSetup) renumber(project.globalSetup)
+		project.modules = modules
+	}
+	const file = path.join(dir, 'dependencies.json')
+	const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
+	await writeFile(tmp, JSON.stringify(records))
+	await rename(tmp, file)
 }
 
 function sameShard(a: Shard | null, b: Shard | undefined): boolean {
@@ -793,6 +893,7 @@ export class SnapshotRecorder implements Reporter {
 		const cacheDir = this.vitest.vite.config.cacheDir
 		const { root, shard } = this.vitest.config
 		const repo = await repoRoot(root)
+		await pruneRecords(this.vitest, repo, cacheDir)
 		const snapshot: Snapshot = {
 			version: SNAPSHOT_VERSION,
 			runtime: runtimeId(),
