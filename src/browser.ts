@@ -24,7 +24,7 @@ const warned = new WeakSet<Vitest>()
  * module the browser loaded; walking its graph from the test file and the
  * setup files gives the same set the node worker reports, recorded through
  * the same call its RPC makes. Virtual modules (`/@vitest/...`, `\0...`) have
- * no file and are left out, as are vitest's own sources.
+ * no file and are left out; vitest drops `node_modules` paths itself.
  */
 export function recordBrowserDependencies(
 	vitest: Vitest,
@@ -60,7 +60,7 @@ export function recordBrowserDependencies(
 		const node = queue.pop()
 		if (!node?.id || seen.has(node.id)) continue
 		seen.add(node.id)
-		if (node.file && !node.file.includes('/vitest/dist/')) files.add(node.file)
+		if (node.file) files.add(node.file)
 		for (const imported of node.importedModules) queue.push(imported)
 	}
 	cache.record(project, module.moduleId, [...files])
