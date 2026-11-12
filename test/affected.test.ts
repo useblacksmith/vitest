@@ -44,6 +44,7 @@ const TESTS = [
 	'worker',
 	'unhandled',
 	'generated',
+	'flaky',
 ]
 
 interface Run {
@@ -772,6 +773,28 @@ describe('git-ignored inputs', () => {
 })
 
 describe('what a snapshot may vouch for', () => {
+	test('a deselected file vitest reran anyway and that failed is not vouched for', async () => {
+		const repo = new Repo('forced')
+		await repo.run()
+		expect((await repo.run('--changed')).ran).toEqual([])
+		// A config change makes vitest rerun every file, including the ones our
+		// provider deselected; flaky fails in that run.
+		repo.env.BLACKSMITH_FLAKY = '1'
+		repo.write(
+			'vitest.config.ts',
+			`${readFileSync(path.join(repo.cwd, 'vitest.config.ts'), 'utf8')}// touched\n`,
+		)
+		const forced = await repo.run('--changed')
+		expect(forced.ran).toEqual([...TESTS].sort())
+		expect(forced.exitCode).toBe(1)
+		expect(repo.snapshot()?.tests).not.toContain('src/flaky.test.ts')
+		delete repo.env.BLACKSMITH_FLAKY
+		const next = await repo.run('--changed')
+		expect(next.ran).toEqual(['flaky'])
+		expect(next.exitCode, next.output).toBe(0)
+		expect((await repo.run('--changed')).ran).toEqual([])
+	})
+
 	test('a run that exits 1 on an unhandled error writes no snapshot', async () => {
 		const repo = new Repo('unhandled')
 		repo.env.BLACKSMITH_UNHANDLED = '1'

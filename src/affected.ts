@@ -795,10 +795,14 @@ export class SnapshotRecorder implements Reporter {
 		}
 		const vouched: string[] = []
 		const left: string[] = []
+		// Vitest reruns a deselected file when its config or globalSetup changed;
+		// one that ran is judged by its result, deselection vouches only for
+		// files that did not run.
 		for (const file of owned) {
-			;(deselected.has(file) || passed.get(file) === true ? vouched : left).push(
-				file,
-			)
+			const fine = this.started.has(file)
+				? passed.get(file) === true
+				: deselected.has(file)
+			;(fine ? vouched : left).push(file)
 		}
 		return { vouched, left }
 	}
