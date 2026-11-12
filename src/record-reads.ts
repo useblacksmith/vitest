@@ -31,15 +31,6 @@ const childProcess =
 const workerThreads =
 	require('node:worker_threads') as typeof import('node:worker_threads')
 
-// Unwrapped, so this module's own file handling records nothing.
-const {
-	existsSync: exists,
-	mkdtempSync: mkdtemp,
-	readFileSync: read,
-	statSync: stat,
-	unlinkSync: unlink,
-} = fs
-
 const CONTEXT = Symbol.for('blacksmith.recordReads.context')
 
 interface WorkerState {
@@ -56,6 +47,29 @@ interface Context {
 // builtin is shared, so it carries the context that holds the worker state.
 const shared = fs as unknown as Record<symbol, unknown>
 shared[CONTEXT] = globalThis
+
+const ORIGINALS = Symbol.for('blacksmith.recordReads.originals')
+
+type Originals = Pick<
+	typeof fs,
+	'existsSync' | 'mkdtempSync' | 'readFileSync' | 'statSync' | 'unlinkSync'
+>
+
+// Unwrapped, so this module's own file handling records nothing; kept on the
+// builtin because a later evaluation in the same process finds `fs` wrapped.
+const {
+	existsSync: exists,
+	mkdtempSync: mkdtemp,
+	readFileSync: read,
+	statSync: stat,
+	unlinkSync: unlink,
+} = ((shared[ORIGINALS] as Originals | undefined) ??= {
+	existsSync: fs.existsSync,
+	mkdtempSync: fs.mkdtempSync,
+	readFileSync: fs.readFileSync,
+	statSync: fs.statSync,
+	unlinkSync: fs.unlinkSync,
+})
 
 function workerState(): WorkerState | undefined {
 	return (shared[CONTEXT] as Context | undefined)?.__vitest_worker__
