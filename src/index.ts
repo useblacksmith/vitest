@@ -69,6 +69,16 @@ function supportsChanged(vitest: Vitest): boolean {
 	)
 }
 
+/**
+ * Vitest externalizes modules under node_modules, so the installed setup file
+ * would import its own `vitest`: resolved from the plugin's directory, which a
+ * package manager may point at another copy than the one running the tests
+ * (pnpm, for two workspace packages whose peer sets differ). Its `afterAll`
+ * would then register with that copy. Inlined, the plugin's modules get the
+ * running vitest.
+ */
+const PACKAGE = '@useblacksmith/vitest'
+
 export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 	const provider = new TreeSnapshotProvider()
 	let changedApplied = false
@@ -83,12 +93,17 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 				(userConfig as { test?: { sequence?: { sequencer?: unknown } } }).test
 					?.sequence?.sequencer,
 			)
+			// Merging a list into `inline: true` would yield `[true, ...]`.
+			const inlineAll =
+				(userConfig as { test?: { server?: { deps?: { inline?: unknown } } } })
+					.test?.server?.deps?.inline === true
 			return {
 				test: {
 					experimental: options.shadow
 						? { recordDependencies: true }
 						: { recordDependencies: true, vcsProvider: provider },
 					...(theirs ? {} : { sequence: { sequencer: HashShardSequencer } }),
+					...(inlineAll ? {} : { server: { deps: { inline: [PACKAGE] } } }),
 				},
 			}
 		},
