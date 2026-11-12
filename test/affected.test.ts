@@ -1256,3 +1256,37 @@ describe('a project with its own root', () => {
 		expect(dirty.ran, dirty.output).toEqual(['five'])
 	})
 })
+
+describe('browser mode', () => {
+	let repo: Repo
+	beforeAll(() => {
+		repo = new Repo('browser', 'fixture-browser')
+	})
+
+	test('a browser test records what the browser loaded, so --changed reruns it for its own inputs only', async () => {
+		const first = await repo.run()
+		expect(first.exitCode, first.output).toBe(0)
+		expect(first.ran).toEqual(['dom', 'math'])
+		const clean = await repo.run('--changed')
+		expect(clean.exitCode, clean.output).toBe(0)
+		expect(clean.ran).toEqual([])
+
+		const edits: [string, string[]][] = [
+			['src/lib/dom.ts', ['dom']],
+			['src/lib/math.ts', ['math']],
+			['src/lib/shared.ts', ['dom', 'math']],
+			['src/lib/setup-lib.ts', ['dom', 'math']],
+		]
+		for (const [file, expected] of edits) {
+			repo.write(
+				file,
+				`${readFileSync(path.join(repo.cwd, file), 'utf8')}// edited\n`,
+			)
+			const dirty = await repo.run('--changed')
+			expect(dirty.exitCode, dirty.output).toBe(0)
+			expect(dirty.ran, file).toEqual(expected)
+			repo.commit(`edit ${file}`)
+		}
+		expect((await repo.run('--changed')).ran).toEqual([])
+	})
+})
