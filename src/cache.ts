@@ -30,8 +30,18 @@ export interface CacheKey {
 
 export const DEFAULT_CACHE_PREFIX = 'blacksmith-vitest'
 
+/**
+ * What the recorded inputs were resolved and run under. A `matrix.node` job
+ * on another major, or a platform whose resolution differs (case-insensitive
+ * fs, `.node` binaries), must not vouch for this one.
+ */
+export function runtimeId(): string {
+	return `node${process.versions.node.split('.')[0]}-${process.platform}-${process.arch}`
+}
+
 export function cacheKey(input: {
 	snapshotVersion: number
+	runtime: string
 	/** Vitest's root relative to the repository: each package of a monorepo keeps its own entries. */
 	root: string
 	projects: string[]
@@ -40,6 +50,7 @@ export function cacheKey(input: {
 }): CacheKey {
 	const scope = [
 		`v${input.snapshotVersion}`,
+		input.runtime,
 		input.root !== '' || input.projects.some(Boolean)
 			? createHash('sha1')
 					.update([input.root, ...input.projects].join('\n'))

@@ -24,6 +24,7 @@ import {
 } from 'vitest'
 
 import { SNAPSHOT_FILE, type Snapshot } from '../src/affected.ts'
+import { runtimeId } from '../src/cache.ts'
 import { anchorTree, diffTrees } from '../src/git.ts'
 import { shardFor } from '../src/sequencer.ts'
 import { packageRoot } from './harness.ts'
@@ -426,13 +427,13 @@ describe('--changed against the tree snapshot', () => {
 		expect((await repo.run('--changed')).ran).toEqual([])
 	})
 
-	test('the anchor covers only recorded paths and lockfiles', async () => {
+	test('the anchor covers recorded paths, lockfiles and the manifests above them', async () => {
 		const tree = repo.snapshot()?.tree ?? {}
 		expect(Object.keys(tree)).toContain('src/fixtures/five/data.json')
 		expect(tree['src/fixtures/six']).toMatch(/^040000 [0-9a-f]{40}$/)
 		expect(Object.keys(tree)).toContain('package-lock.json')
 		expect(Object.keys(tree)).not.toContain('src/fixtures/six/a.txt')
-		expect(Object.keys(tree)).not.toContain('package.json')
+		expect(Object.keys(tree)).toContain('package.json')
 	})
 
 	test('a changed snapshot file reruns its test', async () => {
@@ -970,7 +971,7 @@ describe('the dependency record travels through the Actions cache', () => {
 		const first = await producer.run()
 		expect(first.exitCode, first.output).toBe(0)
 		expect(first.output).toContain(
-			'saved dependency cache blacksmith-vitest-v6-all-1of1-',
+			`saved dependency cache blacksmith-vitest-v6-${runtimeId()}-all-1of1-`,
 		)
 		expect([...cache.entries.values()].filter((e) => e.final)).toHaveLength(1)
 
@@ -979,7 +980,7 @@ describe('the dependency record travels through the Actions cache', () => {
 		const restored = await consumer.run('--changed')
 		expect(restored.exitCode, restored.output).toBe(0)
 		expect(restored.output).toContain(
-			'restored dependency cache blacksmith-vitest-v6-all-1of1-',
+			`restored dependency cache blacksmith-vitest-v6-${runtimeId()}-all-1of1-`,
 		)
 		expect(restored.ran).toEqual([])
 
@@ -1006,7 +1007,9 @@ describe('the dependency record travels through the Actions cache', () => {
 		expect(clean.exitCode, clean.output).toBe(0)
 		expect(clean.ran).toEqual([...TESTS].sort())
 		expect(clean.output).toMatch(
-			/shadow: would have run 0 of \d+ test files \(0 files changed since [0-9a-f]{12}, from blacksmith-vitest-v6-all-1of1-/,
+			new RegExp(
+				`shadow: would have run 0 of \\d+ test files \\(0 files changed since [0-9a-f]{12}, from blacksmith-vitest-v6-${runtimeId()}-all-1of1-`,
+			),
 		)
 		expect(clean.output).not.toContain('restored dependency cache')
 		expect(clean.output).toContain('saved dependency cache')
@@ -1213,7 +1216,7 @@ describe('packages of one repository keep separate caches', () => {
 		expect(nested.snapshot()?.root).toBe('packages/a')
 		const keys = [...cache.entries]
 			.filter(([, entry]) => entry.final)
-			.map(([key]) => key.split('-').slice(0, 4).join('-'))
+			.map(([key]) => key.replace(/-[0-9a-f]{40}$/, ''))
 		expect(keys).toHaveLength(2)
 		expect(new Set(keys).size).toBe(2)
 
@@ -1254,5 +1257,71 @@ describe('a project with its own root', () => {
 		const dirty = await repo.run()
 		expect(dirty.exitCode, dirty.output).toBe(0)
 		expect(dirty.ran, dirty.output).toEqual(['five'])
+	})
+})
+
+describe('identity: runtime, manifests and the workflow file', () => {
+	test('a snapshot from another node major, platform or arch vouches for nothing', async () => {
+		const repo = new Repo('runtime')
+		await repo.run()
+		expect(repo.snapshot()?.runtime).toBe(runtimeId())
+		expect((await repo.run('--changed')).ran).toEqual([])
+		repo.patchSnapshot({ runtime: 'node0-plan9-mips' })
+		const other = await repo.run('--changed')
+		expect(other.ran).toEqual([...TESTS].sort())
+		expect(other.output).toContain('was made on node0-plan9-mips')
+	})
+
+	test('a changed package.json reruns every test with a recorded file below it', async () => {
+		const repo = new Repo('manifest')
+		repo.write(
+			'src/lib/tsconfig.json',
+			'{ "compilerOptions": { "strict": true } }\n',
+		)
+		repo.commit('lib tsconfig')
+		await repo.run()
+		expect(Object.keys(repo.snapshot()?.tree ?? {})).toContain(
+			'src/lib/tsconfig.json',
+		)
+		expect((await repo.run('--changed')).ran).toEqual([])
+		// Only one, two and three import from src/lib.
+		repo.write(
+			'src/lib/tsconfig.json',
+			'{ "compilerOptions": { "strict": false } }\n',
+		)
+		const lib = await repo.run('--changed')
+		expect(lib.ran).toEqual(['one', 'three', 'two'])
+		expect(lib.output).toContain('3 test files under a changed manifest')
+		repo.commit('loosen lib tsconfig')
+		expect((await repo.run('--changed')).ran).toEqual([])
+		// The root package.json sits above every recorded file.
+		repo.write(
+			'package.json',
+			JSON.stringify(
+				{ name: 'fixture-affected', private: true, type: 'module', sideEffects: false },
+				null,
+				'\t',
+			),
+		)
+		expect((await repo.run('--changed')).ran).toEqual([...TESTS].sort())
+	})
+
+	test('a change to the workflow running the job reruns everything', async () => {
+		const repo = new Repo('workflow')
+		repo.write('.github/workflows/ci.yml', 'on: push\njobs: {}\n')
+		repo.commit('workflow')
+		repo.env = {
+			GITHUB_REPOSITORY: 'acme/fixture',
+			GITHUB_WORKFLOW_REF: 'acme/fixture/.github/workflows/ci.yml@refs/heads/main',
+		}
+		await repo.run()
+		expect(repo.snapshot()?.tree['.github/workflows/ci.yml']).toMatch(
+			/^100644 [0-9a-f]{40}$/,
+		)
+		expect((await repo.run('--changed')).ran).toEqual([])
+		repo.write('.github/workflows/ci.yml', 'on: push\nenv: { CI: 1 }\njobs: {}\n')
+		const run = await repo.run('--changed')
+		expect(run.ran).toEqual([...TESTS].sort())
+		expect(run.output).toContain('.github/workflows/ci.yml changed, running every test')
 	})
 })
