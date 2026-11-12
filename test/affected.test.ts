@@ -40,6 +40,8 @@ const TESTS = [
 	'mapped',
 	'child',
 	'child-async',
+	'child-killed',
+	'worker',
 ]
 
 interface Run {
@@ -246,6 +248,22 @@ describe('--changed against the tree snapshot', () => {
 			const dirty = await repo.run('--changed')
 			expect(dirty.exitCode, dirty.output).toBe(0)
 			expect(dirty.ran, file).toEqual(['child', 'child-async'])
+			repo.commit(`edit ${file}`)
+		}
+		expect((await repo.run('--changed')).ran).toEqual([])
+	})
+
+	test('a child the test kills and a worker thread it terminates still record what they loaded', async () => {
+		const edits: [string, string[]][] = [
+			['src/scripts/child-server-lib.mjs', ['child-killed']],
+			['src/scripts/worker-lib.mjs', ['worker']],
+			['src/fixtures/worker/data.txt', ['worker']],
+		]
+		for (const [file, expected] of edits) {
+			repo.write(file, `${readFileSync(path.join(repo.cwd, file), 'utf8')}// edited\n`)
+			const dirty = await repo.run('--changed')
+			expect(dirty.exitCode, dirty.output).toBe(0)
+			expect(dirty.ran, file).toEqual(expected)
 			repo.commit(`edit ${file}`)
 		}
 		expect((await repo.run('--changed')).ran).toEqual([])
@@ -655,12 +673,53 @@ describe('vm pools', () => {
 	})
 
 	test('reads are charged to the file of the current context', async () => {
-		const first = await repo.run('--pool=vmThreads')
+		const first = await repo.run('--pool=vmThreads', '--maxWorkers=1')
 		expect(first.exitCode, first.output).toBe(0)
 		repo.write('src/fixtures/five/data.json', '{ "value": "five", "vm": 1 }\n')
-		expect((await repo.run('--changed', '--pool=vmThreads')).ran).toEqual([
-			'five',
-		])
+		expect(
+			(await repo.run('--changed', '--pool=vmThreads', '--maxWorkers=1')).ran,
+		).toEqual(['five'])
+	})
+
+	test('children of every context are drained by their own file', async () => {
+		// One thread runs every file, so each file after the first evaluates
+		// the setup file again in a new context.
+		repo.commit('vm')
+		const edits: [string, string[]][] = [
+			['src/scripts/child-server-lib.mjs', ['child-killed']],
+			['src/scripts/worker-lib.mjs', ['worker']],
+		]
+		for (const [file, expected] of edits) {
+			repo.write(file, `${readFileSync(path.join(repo.cwd, file), 'utf8')}// vm\n`)
+			const dirty = await repo.run(
+				'--changed',
+				'--pool=vmThreads',
+				'--maxWorkers=1',
+			)
+			expect(dirty.exitCode, dirty.output).toBe(0)
+			expect(dirty.ran, file).toEqual(expected)
+			repo.commit(`edit ${file}`)
+		}
+	})
+})
+
+describe('worker threads', () => {
+	let repo: Repo
+	beforeAll(() => {
+		repo = new Repo('worker-env')
+		// Allowed in a process's NODE_OPTIONS, not in a worker's: node refuses
+		// a worker whose NODE_OPTIONS differs from the parent's and holds it.
+		repo.env.NODE_OPTIONS = '--title=blacksmith-test'
+	})
+
+	test('a NODE_OPTIONS a worker may not carry leaves the worker running as asked', async () => {
+		const run = await repo.run()
+		expect(run.exitCode, run.output).toBe(0)
+		expect(run.output).not.toContain('ERR_WORKER_INVALID_EXEC_ARGV')
+		expect(run.ran).toEqual([...TESTS].sort())
+		// Without the preload, only the script itself is known.
+		repo.write('src/scripts/worker-script.mjs', `${readFileSync(path.join(repo.cwd, 'src/scripts/worker-script.mjs'), 'utf8')}// edited\n`)
+		expect((await repo.run('--changed')).ran).toEqual(['worker'])
 	})
 })
 
