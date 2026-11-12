@@ -271,3 +271,37 @@ export function diffTrees(before: Tree, after: Tree): string[] {
 	}
 	return changed
 }
+
+/**
+ * The blob sha each of `paths` had at `commit`, for those that were tracked
+ * there; `null` when git cannot answer. `cat-file` replies one line per request
+ * in order, so a path is matched by position and may hold spaces; one holding
+ * a newline cannot be requested and is left out.
+ */
+export async function blobsAt(
+	repo: string,
+	commit: string,
+	paths: readonly string[],
+): Promise<Map<string, string> | null> {
+	const named = paths.filter((file) => !file.includes('\n'))
+	if (named.length === 0) return new Map()
+	let output: string
+	try {
+		output = await git(
+			repo,
+			['cat-file', '--batch-check=%(objectname) %(objecttype)'],
+			named.map((file) => `${commit}:${file}\n`).join(''),
+		)
+	} catch {
+		return null
+	}
+	const lines = output.split('\n')
+	const result = new Map<string, string>()
+	named.forEach((file, index) => {
+		const line = lines[index] ?? ''
+		if (line.endsWith(' missing')) return
+		const [sha, type] = line.split(' ')
+		if (type === 'blob' && sha) result.set(file, sha)
+	})
+	return result
+}
