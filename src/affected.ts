@@ -122,12 +122,15 @@ function workflowPath(): string | null {
 /** `dir` and every parent up to the repository root, repo-relative ('' for the root). */
 function ancestors(dir: string): string[] {
 	const result: string[] = []
-	for (let current = dir; ; current = path.dirname(current)) {
+	for (let current = dir; ; ) {
 		if (current === '.' || current === '') {
 			result.push('')
 			return result
 		}
 		result.push(current)
+		const parent = path.dirname(current)
+		if (parent === current) return result
+		current = parent
 	}
 }
 
@@ -234,7 +237,8 @@ async function anchoredPaths(
 		for (const file of [...project.modules, ...Object.keys(project.files)]) {
 			const relative = repoRelative(repo, path.resolve(root, file))
 			paths.add(relative)
-			if (relative.startsWith('..')) continue
+			// Outside the repository (`..`, or another drive on Windows): no manifest above it is ours.
+			if (relative.startsWith('..') || path.isAbsolute(relative)) continue
 			for (const dir of ancestors(repoDir(relative))) dirs.add(dir)
 		}
 	}
