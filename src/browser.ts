@@ -44,11 +44,18 @@ export function recordBrowserDependencies(
 	}
 	const graph = project.vite.environments.client?.moduleGraph
 	if (!graph) return
-	const files = new Set<string>()
+	const roots = [...(graph.getModulesByFile(module.moduleId) ?? [])]
+	// A test the browser never fetched through this graph has no record to
+	// give; an empty one would let `--changed` skip it on every edit.
+	if (roots.length === 0) return
+	const files = new Set<string>([module.moduleId])
 	const seen = new Set<string>()
-	const queue = [module.moduleId, ...project.config.setupFiles].flatMap(
-		(file) => [...(graph.getModulesByFile(file) ?? [])],
-	)
+	const queue = [
+		...roots,
+		...project.config.setupFiles.flatMap((file) => [
+			...(graph.getModulesByFile(file) ?? []),
+		]),
+	]
 	while (queue.length > 0) {
 		const node = queue.pop()
 		if (!node?.id || seen.has(node.id)) continue
