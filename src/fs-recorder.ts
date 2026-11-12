@@ -7,6 +7,8 @@ export const BRAND = Symbol.for('blacksmith.recordReads')
 
 /** Set in a child process's environment: the file its recorder appends the paths it loaded or read to. */
 export const CHILD_RECORD_ENV = 'BLACKSMITH_CHILD_RECORD'
+/** The repository root; a read outside it is not recorded, the anchor cannot cover it. */
+export const ENV_REPO = 'BLACKSMITH_REPO'
 
 export function toPath(target: unknown): string | null {
 	if (typeof target === 'string') return target
@@ -23,7 +25,11 @@ export function toPath(target: unknown): string | null {
 
 /** Installed packages are vouched for by the lockfile, not by their files. */
 export function isIgnored(absolute: string): boolean {
-	return absolute.split(path.sep).includes('node_modules')
+	if (absolute.split(path.sep).includes('node_modules')) return true
+	const repo = process.env[ENV_REPO]
+	if (!repo) return false
+	const relative = path.relative(repo, absolute)
+	return relative.startsWith('..') || path.isAbsolute(relative)
 }
 
 type Wrappable = Record<string, unknown>
