@@ -44,6 +44,8 @@ const CONTEXT = Symbol.for('blacksmith.recordReads.context')
 
 interface WorkerState {
 	dependencies?: Set<string>
+	/** The test file being run. */
+	filepath?: string
 }
 
 interface Context {
@@ -55,9 +57,12 @@ interface Context {
 const shared = fs as unknown as Record<symbol, unknown>
 shared[CONTEXT] = globalThis
 
-function dependencies(): Set<string> | undefined {
+function workerState(): WorkerState | undefined {
 	return (shared[CONTEXT] as Context | undefined)?.__vitest_worker__
-		?.dependencies
+}
+
+function dependencies(): Set<string> | undefined {
+	return workerState()?.dependencies
 }
 
 function record(file: string, cwd = process.cwd()): void {
@@ -119,16 +124,23 @@ interface Child {
 	/** The record file the child was given, `null` when nothing is being recorded. */
 	file: string | null
 	cwd: string
-	/** Its test file has finished: what it reports from now on belongs to no test. */
-	detached: boolean
+	/** The test file that started it; what it reports counts only while that file runs. */
+	test: string | undefined
 }
 
-/** Children of the current test file that have not exited yet. */
-const outstanding = new Set<Child>()
+const OUTSTANDING = Symbol.for('blacksmith.recordReads.outstanding')
+
+// On the shared builtin, like the context: the `vm` pools evaluate this file
+// once per test file while the wrapped `child_process` and `Worker` keep the
+// first evaluation's closures, so every evaluation must see one set.
+/** Children that have not exited yet, each still charged to the test file that started it. */
+function outstanding(): Set<Child> {
+	return ((shared[OUTSTANDING] as Set<Child> | undefined) ??= new Set())
+}
 
 function startChild(file: string | null, cwd: string): Child {
-	const child: Child = { file, cwd, detached: false }
-	if (file !== null) outstanding.add(child)
+	const child: Child = { file, cwd, test: workerState()?.filepath }
+	if (file !== null) outstanding().add(child)
 	return child
 }
 
@@ -178,9 +190,9 @@ function instrument(args: unknown[]): Child {
 	return startChild(recorded?.file ?? null, cwd)
 }
 
-/** What the child has reported so far, relative to its working directory. */
+/** What the child has reported so far, relative to its working directory, while its test file is the one running. */
 function recordReported(child: Child): void {
-	if (child.file === null || child.detached) return
+	if (child.file === null || child.test !== workerState()?.filepath) return
 	let reported: string
 	try {
 		reported = read(child.file, 'utf8')
@@ -197,18 +209,21 @@ function collect(child: Child): void {
 	try {
 		unlink(child.file)
 	} catch {}
-	outstanding.delete(child)
+	outstanding().delete(child)
 }
 
 // Vitest ships the test file's dependency set as soon as its hooks are done,
 // so a child still running then (a server the test tears down, a worker it
-// never joins) reports what it has loaded so far here and nothing afterwards.
+// never joins) reports what it has loaded so far here. Whether this hook
+// runs before or after the file's own `afterAll` (`sequence.hooks`), the
+// child's exit still reports to this file while it is the one running.
 afterAll(() => {
-	for (const child of outstanding) {
+	const current = workerState()?.filepath
+	for (const child of outstanding()) {
+		if (child.test !== current) continue
 		recordReported(child)
-		child.detached = true
+		outstanding().delete(child)
 	}
-	outstanding.clear()
 })
 
 type Wrappable = Record<string, unknown>
@@ -232,10 +247,11 @@ function wrapChildProcess(name: string, sync: boolean): void {
 				const process = call.apply(this, args) as
 					| { once?: (event: string, listener: () => void) => unknown }
 					| undefined
+				// Only `exit`: an `error` listener would keep a spawn failure from
+				// surfacing as the uncaught error it is. A child that never ran
+				// reported nothing and is forgotten with its test file.
 				if (typeof process?.once === 'function') {
-					const done = () => collect(child)
-					process.once('exit', done)
-					process.once('error', done)
+					process.once('exit', () => collect(child))
 				}
 				return process
 			}
@@ -273,50 +289,75 @@ for (const name of ['spawnSync', 'execSync', 'execFileSync']) {
 	wrapChildProcess(name, true)
 }
 
+type WorkerOptions = import('node:worker_threads').WorkerOptions
+
+/** The script a worker runs, when it is a file; `null` for `eval`, `data:` and `node:` sources. */
+function workerScript(
+	filename: string | URL,
+	options: WorkerOptions | undefined,
+): string | null {
+	if (options?.eval === true) return null
+	if (filename instanceof URL) {
+		return filename.protocol === 'file:' ? fileURLToPath(filename) : null
+	}
+	return filename.startsWith('data:') || filename.startsWith('node:')
+		? null
+		: filename
+}
+
 /**
  * A worker thread has its own `fs` builtin and module registry, so it is
- * recorded like a child: the preload comes through its `env` (`NODE_OPTIONS`
- * is read from there), and the script it runs is recorded right away. A
- * worker sharing the parent's environment (`env: SHARE_ENV`) contributes
- * only its script.
+ * recorded like a child: the preload comes through its `env` (a worker reads
+ * `NODE_OPTIONS` from there), and the script it runs is recorded right away.
+ * A worker sharing the parent's environment (`env: SHARE_ENV`) contributes
+ * only its script, and so does one whose `NODE_OPTIONS` node refuses to
+ * change (the parent's holds an option a worker's may not carry, `--title`
+ * say): it is then started exactly as asked.
  */
 function wrapWorker(): void {
 	const target = workerThreads as unknown as Wrappable
 	const Original = workerThreads.Worker
 	if (BRAND in Original) return
-	type WorkerOptions = import('node:worker_threads').WorkerOptions
-	class RecordedWorker extends Original {
-		constructor(filename: string | URL, options?: WorkerOptions) {
-			let child: Child = { file: null, cwd: process.cwd(), detached: false }
-			if (dependencies()) {
-				const script =
-					options?.eval === true
-						? null
-						: filename instanceof URL
-							? filename.protocol === 'file:'
-								? fileURLToPath(filename)
-								: null
-							: filename.startsWith('data:') || filename.startsWith('node:')
-								? null
-								: filename
-				if (script !== null) record(script)
-				const given = options?.env
-				if (given !== workerThreads.SHARE_ENV) {
-					const recorded = recordedEnv(given as Env | undefined)
-					if (recorded) {
-						options = { ...options, env: recorded.env }
-						child = startChild(recorded.file, process.cwd())
-					}
-				}
+	type Instance = import('node:worker_threads').Worker
+	function RecordedWorker(
+		this: unknown,
+		filename: string | URL,
+		options?: WorkerOptions,
+	): Instance {
+		const construct = (given: WorkerOptions | undefined) =>
+			Reflect.construct(
+				Original,
+				[filename, given],
+				new.target ?? RecordedWorker,
+			) as Instance
+		if (!dependencies()) return construct(options)
+		const script = workerScript(filename, options)
+		if (script !== null) record(script)
+		const recorded =
+			options?.env === workerThreads.SHARE_ENV
+				? null
+				: recordedEnv(options?.env as Env | undefined)
+		if (!recorded) return construct(options)
+		const child = startChild(recorded.file, process.cwd())
+		let worker: Instance
+		try {
+			worker = construct({ ...options, env: recorded.env })
+		} catch (error) {
+			outstanding().delete(child)
+			if (
+				(error as { code?: unknown }).code !== 'ERR_WORKER_INVALID_EXEC_ARGV'
+			) {
+				throw error
 			}
-			super(filename, options)
-			if (child.file !== null) {
-				const done = () => collect(child)
-				this.once('exit', done)
-				this.once('error', done)
-			}
+			return construct(options)
 		}
+		// `exit` follows an uncaught error in the worker too; an `error`
+		// listener here would swallow that error instead of letting Vitest report it.
+		worker.once('exit', () => collect(child))
+		return worker
 	}
+	RecordedWorker.prototype = Original.prototype
+	Object.setPrototypeOf(RecordedWorker, Original)
 	copyProperties(RecordedWorker, Original)
 	Object.defineProperty(RecordedWorker, BRAND, { value: true })
 	target.Worker = RecordedWorker
