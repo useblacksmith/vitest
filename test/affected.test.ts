@@ -29,7 +29,18 @@ import { shardFor } from '../src/sequencer.ts'
 import { packageRoot } from './harness.ts'
 
 const vitestBin = path.join(packageRoot, 'node_modules', 'vitest', 'vitest.mjs')
-const TESTS = ['one', 'two', 'three', 'five', 'six', 'snap', 'alias', 'mapped']
+const TESTS = [
+	'one',
+	'two',
+	'three',
+	'five',
+	'six',
+	'snap',
+	'alias',
+	'mapped',
+	'child',
+	'child-async',
+]
 
 interface Run {
 	exitCode: number
@@ -218,6 +229,25 @@ describe('--changed against the tree snapshot', () => {
 		expect(dirty.exitCode, dirty.output).toBe(0)
 		expect(dirty.ran).toEqual(['five'])
 		repo.commit('touch fixture')
+		expect((await repo.run('--changed')).ran).toEqual([])
+	})
+
+	test('a child process records the script it runs, what that imports and what it reads', async () => {
+		const edits: [string, string][] = [
+			['src/scripts/child-lib.mjs', "export const lib = 'lib' // edited\n"],
+			['src/fixtures/child/data.txt', 'data edited\n'],
+			[
+				'src/scripts/child-script.mjs',
+				`${readFileSync(path.join(repo.cwd, 'src/scripts/child-script.mjs'), 'utf8')}// edited\n`,
+			],
+		]
+		for (const [file, content] of edits) {
+			repo.write(file, content)
+			const dirty = await repo.run('--changed')
+			expect(dirty.exitCode, dirty.output).toBe(0)
+			expect(dirty.ran, file).toEqual(['child', 'child-async'])
+			repo.commit(`edit ${file}`)
+		}
 		expect((await repo.run('--changed')).ran).toEqual([])
 	})
 
