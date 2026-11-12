@@ -168,7 +168,7 @@ export async function anchorTree(
 				!path.isAbsolute(file),
 		)
 		.sort()
-	const tree: Tree = {}
+	const tree: Tree = Object.create(null) as Tree
 	if (wanted.length === 0) return tree
 	const present = new Map<string, Stats>()
 	for (const file of wanted) {
@@ -225,13 +225,31 @@ export async function anchorTree(
 			modes[index] = indexModes.get(file) ?? '100644'
 		})
 	}
+	// `hash-object --stdin-paths` takes one path per line and has no `-z`: a
+	// path with a newline in it would split into two and shift every sha after
+	// it, so such a file gets its own call.
+	const batched: number[] = []
+	for (const [index, file] of files.entries()) {
+		if (!file.includes('\n')) {
+			batched.push(index)
+			continue
+		}
+		const sha = (await git(repo, ['hash-object', '--', file])).trim()
+		tree[file] = `${modes[index]} ${sha}`
+	}
+	if (batched.length === 0) return tree
 	const shas = (
-		await git(repo, ['hash-object', '--stdin-paths'], files.join('\n'))
+		await git(
+			repo,
+			['hash-object', '--stdin-paths'],
+			batched.map((index) => files[index]).join('\n'),
+		)
 	)
 		.trim()
 		.split('\n')
-	files.forEach((file, index) => {
-		const sha = shas[index]
+	batched.forEach((index, position) => {
+		const file = files[index] ?? ''
+		const sha = shas[position]
 		if (sha === undefined)
 			throw new Error(`git hash-object returned no sha for ${file}`)
 		tree[file] = `${modes[index]} ${sha}`
@@ -243,10 +261,10 @@ export async function anchorTree(
 export function diffTrees(before: Tree, after: Tree): string[] {
 	const changed: string[] = []
 	for (const [file, sha] of Object.entries(after)) {
-		if (before[file] !== sha) changed.push(file)
+		if (!Object.hasOwn(before, file) || before[file] !== sha) changed.push(file)
 	}
 	for (const file of Object.keys(before)) {
-		if (!(file in after)) changed.push(file)
+		if (!Object.hasOwn(after, file)) changed.push(file)
 	}
 	return changed
 }

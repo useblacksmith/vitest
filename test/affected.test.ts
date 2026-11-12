@@ -25,6 +25,7 @@ import {
 
 import { SNAPSHOT_FILE, type Snapshot } from '../src/affected.ts'
 import { BloomFilter } from '../src/bloom.ts'
+import { anchorTree, diffTrees } from '../src/git.ts'
 import { shardFor } from '../src/sequencer.ts'
 import { packageRoot } from './harness.ts'
 
@@ -42,6 +43,7 @@ const TESTS = [
 	'child-async',
 	'child-killed',
 	'worker',
+	'unhandled',
 ]
 
 interface Run {
@@ -720,6 +722,60 @@ describe('worker threads', () => {
 		// Without the preload, only the script itself is known.
 		repo.write('src/scripts/worker-script.mjs', `${readFileSync(path.join(repo.cwd, 'src/scripts/worker-script.mjs'), 'utf8')}// edited\n`)
 		expect((await repo.run('--changed')).ran).toEqual(['worker'])
+	})
+})
+
+describe('what a snapshot may vouch for', () => {
+	test('a run that exits 1 on an unhandled error writes no snapshot', async () => {
+		const repo = new Repo('unhandled')
+		repo.env.BLACKSMITH_UNHANDLED = '1'
+		const run = await repo.run()
+		expect(run.exitCode, run.output).toBe(1)
+		expect(run.ran).toEqual([...TESTS].sort())
+		expect(repo.snapshot()).toBeNull()
+	})
+
+	test('a run that owns no test file writes no snapshot', async () => {
+		const repo = new Repo('none')
+		repo.env.BLACKSMITH_CHANGED = '1'
+		const run = await repo.run('--exclude', 'src/**')
+		expect(run.exitCode, run.output).toBe(0)
+		expect(run.ran).toEqual([])
+		expect(repo.snapshot()).toBeNull()
+	})
+})
+
+describe('tree anchoring', () => {
+	test('a file with a newline in its name is hashed on its own and shifts nothing', async () => {
+		const repo = new Repo('newline')
+		const odd = 'src/fixtures/odd\nname.txt'
+		repo.write(odd, 'odd\n')
+		repo.write('src/fixtures/z-after.txt', 'after\n')
+		repo.commit('odd paths')
+		const tree = await anchorTree(repo.dir, [odd, 'src/fixtures/z-after.txt'])
+		const sha = (file: string) =>
+			repo.git('hash-object', '--', file).trim()
+		expect(tree[odd]).toBe(`100644 ${sha(odd)}`)
+		expect(tree['src/fixtures/z-after.txt']).toBe(
+			`100644 ${sha('src/fixtures/z-after.txt')}`,
+		)
+		repo.write(odd, 'edited\n')
+		expect(
+			diffTrees(
+				tree,
+				await anchorTree(repo.dir, [odd, 'src/fixtures/z-after.txt']),
+			),
+		).toEqual([odd])
+	})
+})
+
+describe('tree diffs', () => {
+	test('paths named like Object.prototype members are ordinary entries', () => {
+		expect(diffTrees({ toString: '100644 a' }, {})).toEqual(['toString'])
+		expect(diffTrees({}, { toString: '100644 a' })).toEqual(['toString'])
+		expect(
+			diffTrees({ constructor: '100644 a' }, { constructor: '100644 a' }),
+		).toEqual([])
 	})
 })
 

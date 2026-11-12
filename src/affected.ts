@@ -421,6 +421,10 @@ export class TreeSnapshotProvider implements VCSProvider {
 	}
 }
 
+function containsOnly(module: TestModule): boolean {
+	return (module as { task?: { containsOnly?: boolean } }).task?.containsOnly === true
+}
+
 function isPartialSpecification(specification: TestSpecification): boolean {
 	return (
 		specification.testLines !== undefined ||
@@ -675,16 +679,21 @@ export class SnapshotRecorder implements Reporter {
 		this.started = new Set(
 			specifications.map((specification) => specification.moduleId),
 		)
-		this.partial = specifications.some(isPartialSpecification)
+		this.partial =
+			specifications.some(isPartialSpecification) ||
+			(this.vitest.config.tagsFilter?.length ?? 0) > 0
 	}
 
 	async onTestRunEnd(
 		modules: ReadonlyArray<TestModule>,
-		_errors: ReadonlyArray<unknown>,
+		errors: ReadonlyArray<unknown>,
 		reason: TestRunEndReason,
 	): Promise<void> {
 		await this.reportShadow(modules)
-		if (reason !== 'passed') return
+		// Vitest reports `passed` from the modules alone; an unhandled error
+		// still fails the run, and a test file with `.only` skipped its siblings.
+		if (reason !== 'passed' || errors.length > 0) return
+		if (modules.some((module) => containsOnly(module))) return
 		const covered = await this.coveredTests()
 		if (covered === null) return
 		const cacheDir = this.vitest.vite.config.cacheDir
@@ -758,6 +767,8 @@ export class SnapshotRecorder implements Reporter {
 					.filter(owns),
 			),
 		]
+		// Nothing owned (an `include` matching no file) vouches for nothing.
+		if (owned.length === 0) return null
 		return owned.every((file) => this.started.has(file) || deselected.has(file))
 			? owned
 			: null
