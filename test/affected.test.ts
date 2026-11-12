@@ -25,6 +25,7 @@ import {
 
 import { SNAPSHOT_FILE, type Snapshot } from '../src/affected.ts'
 import { BloomFilter } from '../src/bloom.ts'
+import { diffTrees } from '../src/git.ts'
 import { shardFor } from '../src/sequencer.ts'
 import { packageRoot } from './harness.ts'
 
@@ -40,6 +41,7 @@ const TESTS = [
 	'mapped',
 	'child',
 	'child-async',
+	'unhandled',
 ]
 
 interface Run {
@@ -661,6 +663,36 @@ describe('vm pools', () => {
 		expect((await repo.run('--changed', '--pool=vmThreads')).ran).toEqual([
 			'five',
 		])
+	})
+})
+
+describe('what a snapshot may vouch for', () => {
+	test('a run that exits 1 on an unhandled error writes no snapshot', async () => {
+		const repo = new Repo('unhandled')
+		repo.env.BLACKSMITH_UNHANDLED = '1'
+		const run = await repo.run()
+		expect(run.exitCode, run.output).toBe(1)
+		expect(run.ran).toEqual([...TESTS].sort())
+		expect(repo.snapshot()).toBeNull()
+	})
+
+	test('a run that owns no test file writes no snapshot', async () => {
+		const repo = new Repo('none')
+		repo.env.BLACKSMITH_CHANGED = '1'
+		const run = await repo.run('--exclude', 'src/**')
+		expect(run.exitCode, run.output).toBe(0)
+		expect(run.ran).toEqual([])
+		expect(repo.snapshot()).toBeNull()
+	})
+})
+
+describe('tree diffs', () => {
+	test('paths named like Object.prototype members are ordinary entries', () => {
+		expect(diffTrees({ toString: '100644 a' }, {})).toEqual(['toString'])
+		expect(diffTrees({}, { toString: '100644 a' })).toEqual(['toString'])
+		expect(
+			diffTrees({ constructor: '100644 a' }, { constructor: '100644 a' }),
+		).toEqual([])
 	})
 })
 

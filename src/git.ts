@@ -165,10 +165,12 @@ export async function anchorTree(
 				file !== '.' &&
 				file !== '..' &&
 				!file.startsWith('../') &&
-				!path.isAbsolute(file),
+				!path.isAbsolute(file) &&
+				// `hash-object --stdin-paths` takes one path per line and has no `-z`.
+				!file.includes('\n'),
 		)
 		.sort()
-	const tree: Tree = {}
+	const tree: Tree = Object.create(null) as Tree
 	if (wanted.length === 0) return tree
 	const present = new Map<string, Stats>()
 	for (const file of wanted) {
@@ -243,10 +245,10 @@ export async function anchorTree(
 export function diffTrees(before: Tree, after: Tree): string[] {
 	const changed: string[] = []
 	for (const [file, sha] of Object.entries(after)) {
-		if (before[file] !== sha) changed.push(file)
+		if (!Object.hasOwn(before, file) || before[file] !== sha) changed.push(file)
 	}
 	for (const file of Object.keys(before)) {
-		if (!(file in after)) changed.push(file)
+		if (!Object.hasOwn(after, file)) changed.push(file)
 	}
 	return changed
 }
