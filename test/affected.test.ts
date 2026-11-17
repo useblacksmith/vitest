@@ -522,6 +522,7 @@ describe('coverage', () => {
 	})
 
 	test('a run with coverage warns and runs every test, whatever changed', async () => {
+		repo.env = { BLACKSMITH_CHANGED: '1' }
 		repo.write('src/lib/b.ts', "export const b = 'b' // changed\n")
 		for (const args of [COVERAGE, ['--changed', ...COVERAGE]]) {
 			const run = await repo.run(...args)
