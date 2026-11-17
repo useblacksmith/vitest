@@ -521,12 +521,17 @@ describe('coverage', () => {
 		expect(covered()).toEqual(['src/lib/a.ts', 'src/lib/b.ts'])
 	})
 
-	test('a selection reports coverage for the changed files', async () => {
+	test('a run with coverage warns and runs every test, whatever changed', async () => {
 		repo.write('src/lib/b.ts', "export const b = 'b' // changed\n")
-		const run = await repo.run(...COVERAGE)
-		expect(run.exitCode, run.output).toBe(0)
-		expect(run.ran).toEqual(['three', 'two'])
-		expect(covered()).toEqual(['src/lib/b.ts'])
+		for (const args of [COVERAGE, ['--changed', ...COVERAGE]]) {
+			const run = await repo.run(...args)
+			expect(run.exitCode, run.output).toBe(0)
+			expect(run.output).toContain(
+				'selecting changed tests is not supported with coverage',
+			)
+			expect(run.ran).toEqual([...TESTS].sort())
+			expect(covered()).toEqual(['src/lib/a.ts', 'src/lib/b.ts'])
+		}
 	})
 })
 
@@ -920,6 +925,7 @@ describe('what a snapshot may vouch for', () => {
 		expect(repo.snapshot()?.tests).toHaveLength(TESTS.length)
 		// A snapshot that vouched for every test stops doing so.
 		const again = await repo.run(
+			'--changed',
 			...coverage,
 			'--coverage.thresholds.lines=100',
 		)

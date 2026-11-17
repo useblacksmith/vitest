@@ -161,7 +161,21 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 				restored ??= restoreDependencyCache(vitest)
 				await restored
 			}
+			// With `--changed`, vitest measures coverage for the changed files
+			// alone, so thresholds would pass on a run that covers nothing.
+			const covered = !options.shadow && vitest.config.coverage.enabled
+			if (covered && !changedApplied) {
+				changedApplied = true
+				if (!options.runAllTests) {
+					vitest.logger.warn(
+						'[blacksmith] selecting changed tests is not supported with coverage, running every test',
+					)
+				}
+				vitest.config.changed = false
+				vitest.config.coverage.changed = false
+			}
 			if (
+				!covered &&
 				!options.shadow &&
 				!options.runAllTests &&
 				!vitest.config.changed &&
