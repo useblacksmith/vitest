@@ -181,7 +181,11 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 				]
 			}
 			const reporters = vitest.config.reporters
-			if (!reporters.some(isSnapshotRecorder)) {
+			// An older vitest keeps no dependency records to snapshot.
+			if (
+				supportsVersion(vitest.version) &&
+				!reporters.some(isSnapshotRecorder)
+			) {
 				reporters.push(new SnapshotRecorder(active, { shadow }))
 			}
 		},
