@@ -11,6 +11,7 @@ import {
 	rmSync,
 	writeFileSync,
 } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import {
@@ -24,8 +25,9 @@ import {
 } from 'vitest'
 
 import { SNAPSHOT_FILE, type Snapshot } from '../src/affected.ts'
-import { runtimeId } from '../src/cache.ts'
+import { cacheKey, runtimeId } from '../src/cache.ts'
 import { anchorTree, blobsAt, diffTrees } from '../src/git.ts'
+import { supportsVersion } from '../src/index.ts'
 import { shardFor } from '../src/sequencer.ts'
 import { packageRoot } from './harness.ts'
 
@@ -205,7 +207,7 @@ describe('--changed against the tree snapshot', () => {
 		expect(first.exitCode, first.output).toBe(0)
 		expect(first.ran).toEqual([...TESTS].sort())
 		expect(repo.snapshot()).toMatchObject({
-			version: 6,
+			version: 7,
 			head: repo.git('rev-parse', 'HEAD').trim(),
 			root: '',
 			shard: null,
@@ -240,6 +242,11 @@ describe('--changed against the tree snapshot', () => {
 	})
 
 	test('a child process records the script it runs, what that imports and what it reads', async () => {
+		const leftover = () =>
+			readdirSync(tmpdir()).filter((name) =>
+				name.startsWith('blacksmith-child-'),
+			)
+		const before = leftover()
 		const edits: [string, string][] = [
 			['src/scripts/child-lib.mjs', "export const lib = 'lib' // edited\n"],
 			['src/fixtures/child/data.txt', 'data edited\n'],
@@ -256,6 +263,7 @@ describe('--changed against the tree snapshot', () => {
 			repo.commit(`edit ${file}`)
 		}
 		expect((await repo.run('--changed')).ran).toEqual([])
+		expect(leftover()).toEqual(before)
 	})
 
 	test('a child the test kills and a worker thread it terminates still record what they loaded', async () => {
@@ -513,12 +521,18 @@ describe('coverage', () => {
 		expect(covered()).toEqual(['src/lib/a.ts', 'src/lib/b.ts'])
 	})
 
-	test('a selection reports coverage for the changed files', async () => {
+	test('a run with coverage warns and runs every test, whatever changed', async () => {
+		repo.env = { BLACKSMITH_CHANGED: '1' }
 		repo.write('src/lib/b.ts', "export const b = 'b' // changed\n")
-		const run = await repo.run(...COVERAGE)
-		expect(run.exitCode, run.output).toBe(0)
-		expect(run.ran).toEqual(['three', 'two'])
-		expect(covered()).toEqual(['src/lib/b.ts'])
+		for (const args of [COVERAGE, ['--changed', ...COVERAGE]]) {
+			const run = await repo.run(...args)
+			expect(run.exitCode, run.output).toBe(0)
+			expect(run.output).toContain(
+				'selecting changed tests is not supported with coverage',
+			)
+			expect(run.ran).toEqual([...TESTS].sort())
+			expect(covered()).toEqual(['src/lib/a.ts', 'src/lib/b.ts'])
+		}
 	})
 })
 
@@ -870,6 +884,57 @@ describe('what a snapshot may vouch for', () => {
 		expect(repo.snapshot()).toBeNull()
 	})
 
+	test('a test file that failed to load reruns until it passes', async () => {
+		const repo = new Repo('unloaded')
+		await repo.run()
+		const source = readFileSync(path.join(repo.cwd, 'src/one.test.ts'), 'utf8')
+		repo.write('src/one.test.ts', `${source}\nconst broken = (\n`)
+		const broken = await repo.run('--changed')
+		expect(broken.exitCode, broken.output).toBe(1)
+		expect(repo.snapshot()?.tests).not.toContain('src/one.test.ts')
+		const again = await repo.run('--changed')
+		expect(again.ran).toEqual(['one'])
+		expect(again.exitCode, again.output).toBe(1)
+		repo.write(
+			'src/one.test.ts',
+			`${source}\ntest('fails', () => expect(1).toBe(2))\n`,
+		)
+		const failing = await repo.run('--changed')
+		expect(failing.ran).toEqual(['one'])
+		expect(failing.exitCode, failing.output).toBe(1)
+		repo.write('src/one.test.ts', source)
+		const fixed = await repo.run('--changed')
+		expect(fixed.ran).toEqual(['one'])
+		expect(fixed.exitCode, fixed.output).toBe(0)
+		expect((await repo.run('--changed')).ran).toEqual([])
+	})
+
+	test('a run that fails only its coverage thresholds vouches for no test', async () => {
+		const repo = new Repo('thresholds')
+		// src/scripts only runs in child processes, which v8 coverage does not see.
+		const coverage = ['--coverage', '--coverage.include=src/**']
+		const failed = await repo.run(
+			...coverage,
+			'--coverage.thresholds.lines=100',
+		)
+		expect(failed.exitCode, failed.output).toBe(1)
+		expect(failed.output).toContain('coverage thresholds failed')
+		expect(repo.snapshot()?.tests).toEqual([])
+		const next = await repo.run('--changed', ...coverage)
+		expect(next.ran).toEqual([...TESTS].sort())
+		expect(next.exitCode, next.output).toBe(0)
+		expect(repo.snapshot()?.tests).toHaveLength(TESTS.length)
+		// A snapshot that vouched for every test stops doing so.
+		const again = await repo.run(
+			'--changed',
+			...coverage,
+			'--coverage.thresholds.lines=100',
+		)
+		expect(again.exitCode, again.output).toBe(1)
+		expect(repo.snapshot()?.tests).toEqual([])
+		expect((await repo.run('--changed')).ran).toEqual([...TESTS].sort())
+	})
+
 	test('a run that owns no test file writes no snapshot', async () => {
 		const repo = new Repo('none')
 		repo.env.BLACKSMITH_CHANGED = '1'
@@ -1036,7 +1101,7 @@ describe('the dependency record travels through the Actions cache', () => {
 		const first = await producer.run()
 		expect(first.exitCode, first.output).toBe(0)
 		expect(first.output).toContain(
-			`saved dependency cache blacksmith-vitest-v6-${runtimeId()}-all-1of1-`,
+			`saved dependency cache blacksmith-vitest-v7-${runtimeId()}-all-1of1-`,
 		)
 		expect([...cache.entries.values()].filter((e) => e.final)).toHaveLength(1)
 
@@ -1045,7 +1110,7 @@ describe('the dependency record travels through the Actions cache', () => {
 		const restored = await consumer.run('--changed')
 		expect(restored.exitCode, restored.output).toBe(0)
 		expect(restored.output).toContain(
-			`restored dependency cache blacksmith-vitest-v6-${runtimeId()}-all-1of1-`,
+			`restored dependency cache blacksmith-vitest-v7-${runtimeId()}-all-1of1-`,
 		)
 		expect(restored.ran).toEqual([])
 
@@ -1073,7 +1138,7 @@ describe('the dependency record travels through the Actions cache', () => {
 		expect(clean.ran).toEqual([...TESTS].sort())
 		expect(clean.output).toMatch(
 			new RegExp(
-				`shadow: would have run 0 of \\d+ test files \\(0 files changed since [0-9a-f]{12}, from blacksmith-vitest-v6-${runtimeId()}-all-1of1-`,
+				`shadow: would have run 0 of \\d+ test files \\(0 files changed since [0-9a-f]{12}, from blacksmith-vitest-v7-${runtimeId()}-all-1of1-`,
 			),
 		)
 		expect(clean.output).not.toContain('restored dependency cache')
@@ -1391,7 +1456,81 @@ describe('identity: runtime, manifests and the workflow file', () => {
 	})
 })
 
+describe('identity: the workflow file and job', () => {
+	test("another workflow's or job's snapshot vouches for nothing", async () => {
+		const repo = new Repo('job')
+		const workflow = (file: string, job: string) => ({
+			GITHUB_REPOSITORY: 'acme/fixture',
+			GITHUB_WORKFLOW_REF: `acme/fixture/.github/workflows/${file}@refs/heads/main`,
+			GITHUB_JOB: job,
+		})
+		repo.env = workflow('ci.yml', 'test')
+		await repo.run()
+		expect(repo.snapshot()?.job).toBe('.github/workflows/ci.yml#test')
+		expect((await repo.run('--changed')).ran).toEqual([])
+		repo.env = workflow('nightly.yml', 'test')
+		const nightly = await repo.run('--changed')
+		expect(nightly.ran).toEqual([...TESTS].sort())
+		expect(nightly.output).toContain(
+			'dependency snapshot was made by .github/workflows/ci.yml#test',
+		)
+		expect((await repo.run('--changed')).ran).toEqual([])
+		repo.env = workflow('nightly.yml', 'test-node-22')
+		expect((await repo.run('--changed')).ran).toEqual([...TESTS].sort())
+	})
+
+	test('each job restores only its own cache entries', () => {
+		const key = (job: string) =>
+			cacheKey({
+				snapshotVersion: 7,
+				runtime: runtimeId(),
+				root: '',
+				job,
+				projects: [],
+				shard: null,
+				head: 'f'.repeat(40),
+			})
+		const ci = key('.github/workflows/ci.yml#test')
+		const nightly = key('.github/workflows/nightly.yml#test')
+		expect(ci.key).not.toBe(nightly.key)
+		expect(nightly.key.startsWith(ci.prefix)).toBe(false)
+		expect(key('').prefix).toContain('-all-')
+	})
+})
+
+describe('vitest versions', () => {
+	test('only 5.1.0 and newer select changed tests', () => {
+		expect(supportsVersion('5.0.5')).toBe(false)
+		expect(supportsVersion('4.9.0')).toBe(false)
+		expect(supportsVersion('5.1.0')).toBe(true)
+		expect(supportsVersion('5.2.0-beta.1')).toBe(true)
+		expect(supportsVersion('6.0.0')).toBe(true)
+	})
+})
+
 describe('hygiene: lockfiles, dependency globs and record growth', () => {
+	test('a dependencies glob matches git-ignored files', async () => {
+		const repo = new Repo('ignored-rule')
+		const config = readFileSync(path.join(repo.cwd, 'vitest.config.ts'), 'utf8')
+		repo.write(
+			'vitest.config.ts',
+			config.replace(
+				"dependencies: { 'src/mapped.test.ts': 'mapped/**' },",
+				"dependencies: { 'src/mapped.test.ts': 'build/**' },",
+			),
+		)
+		repo.write('.gitignore', 'node_modules/\nsrc/generated/\nbuild/\n')
+		repo.commit('ignored rule')
+		repo.write('build/out.txt', 'built\n')
+		const first = await repo.run()
+		expect(first.exitCode, first.output).toBe(0)
+		expect(first.output).not.toContain('matches no file')
+		expect(Object.keys(repo.snapshot()?.tree ?? {})).toContain('build/out.txt')
+		expect((await repo.run('--changed')).ran).toEqual([])
+		repo.write('build/out.txt', 'rebuilt\n')
+		expect((await repo.run('--changed')).ran).toEqual(['mapped'])
+	})
+
 	test('a lockfile with no recorded file below it is not anchored', async () => {
 		const repo = new Repo('vendored-lockfile')
 		repo.write('vendor/reference/package-lock.json', '{ "lockfileVersion": 3 }\n')

@@ -7,13 +7,18 @@ import { CHILD_RECORD_ENV, isIgnored, wrapReads } from './fs-recorder.ts'
 /**
  * Preloaded (`--import`) into every node process and worker thread a test
  * starts: records the modules it loads and the files it reads, and appends
- * them to the file the test's recorder named in the environment. Children of
- * the child inherit the environment and append to the same file.
+ * them to a file of its own in the directory the test's recorder named in the
+ * environment. Children of the child inherit the environment and report there too.
  */
 const require = createRequire(import.meta.url)
 const fs = require('node:fs') as typeof import('node:fs')
 const nodeModule = require('node:module') as typeof import('node:module')
-const output = process.env[CHILD_RECORD_ENV]
+const workerThreads =
+	require('node:worker_threads') as typeof import('node:worker_threads')
+const dir = process.env[CHILD_RECORD_ENV]
+const output = dir
+	? path.join(dir, `${process.pid}-${workerThreads.threadId}.txt`)
+	: undefined
 
 if (output) {
 	// Our own bookkeeping must not count as a read.

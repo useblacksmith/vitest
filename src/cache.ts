@@ -44,6 +44,8 @@ export function cacheKey(input: {
 	runtime: string
 	/** Vitest's root relative to the repository: each package of a monorepo keeps its own entries. */
 	root: string
+	/** The workflow file and job, '' outside Actions: jobs keep their own entries. */
+	job: string
 	projects: string[]
 	shard: { index: number; count: number } | null
 	head: string
@@ -51,9 +53,9 @@ export function cacheKey(input: {
 	const scope = [
 		`v${input.snapshotVersion}`,
 		input.runtime,
-		input.root !== '' || input.projects.some(Boolean)
+		input.root !== '' || input.job !== '' || input.projects.some(Boolean)
 			? createHash('sha1')
-					.update([input.root, ...input.projects].join('\n'))
+					.update([input.job, input.root, ...input.projects].join('\n'))
 					.digest('hex')
 					.slice(0, 12)
 			: 'all',

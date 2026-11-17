@@ -9,6 +9,7 @@ import { afterAll } from 'vitest'
 import {
 	BRAND,
 	CHILD_RECORD_ENV,
+	ENV_RECORD_ROOT,
 	copyProperties,
 	isIgnored,
 	wrapReads,
@@ -52,23 +53,33 @@ const ORIGINALS = Symbol.for('blacksmith.recordReads.originals')
 
 type Originals = Pick<
 	typeof fs,
-	'existsSync' | 'mkdtempSync' | 'readFileSync' | 'statSync' | 'unlinkSync'
+	| 'existsSync'
+	| 'mkdirSync'
+	| 'mkdtempSync'
+	| 'readdirSync'
+	| 'readFileSync'
+	| 'rmSync'
+	| 'statSync'
 >
 
 // Unwrapped, so this module's own file handling records nothing; kept on the
 // builtin because a later evaluation in the same process finds `fs` wrapped.
 const {
 	existsSync: exists,
+	mkdirSync: mkdir,
 	mkdtempSync: mkdtemp,
+	readdirSync: readdir,
 	readFileSync: read,
+	rmSync: rm,
 	statSync: stat,
-	unlinkSync: unlink,
 } = ((shared[ORIGINALS] as Originals | undefined) ??= {
 	existsSync: fs.existsSync,
+	mkdirSync: fs.mkdirSync,
 	mkdtempSync: fs.mkdtempSync,
+	readdirSync: fs.readdirSync,
 	readFileSync: fs.readFileSync,
+	rmSync: fs.rmSync,
 	statSync: fs.statSync,
-	unlinkSync: fs.unlinkSync,
 })
 
 function workerState(): WorkerState | undefined {
@@ -97,20 +108,48 @@ const recordChild = fileURLToPath(
 	),
 )
 
-let recordDir: string | undefined
-let spawned = 0
+const RECORD_DIRS = Symbol.for('blacksmith.recordReads.recordDirs')
 
-/** Where one child (and its descendants) appends what it loaded. */
-function recordFile(): string {
-	recordDir ??= mkdtemp(path.join(os.tmpdir(), 'blacksmith-child-'))
-	return path.join(recordDir, `${process.pid}-${spawned++}.txt`)
+interface RecordDirs {
+	root: string
+	byTest: Map<string, string>
+}
+
+/**
+ * The directory the children of the running test file report to, each in a
+ * file of its own. One per test file, not per child: a test comparing the
+ * environments of two children it started must find them equal.
+ */
+function recordDir(): string {
+	let dirs = shared[RECORD_DIRS] as RecordDirs | undefined
+	if (!dirs) {
+		// The main process makes and removes the root: vitest may end a
+		// worker with no `exit` event, and a child can outlive the hooks here.
+		const given = process.env[ENV_RECORD_ROOT]
+		const root = given ?? mkdtemp(path.join(os.tmpdir(), 'blacksmith-child-'))
+		dirs = shared[RECORD_DIRS] = { root, byTest: new Map() }
+		if (!given) {
+			process.once('exit', () => {
+				try {
+					rm(root, { recursive: true, force: true })
+				} catch {}
+			})
+		}
+	}
+	const test = workerState()?.filepath ?? ''
+	let dir = dirs.byTest.get(test)
+	if (!dir) {
+		dir = mkdtemp(path.join(dirs.root, 't-'))
+		dirs.byTest.set(test, dir)
+	}
+	return dir
 }
 
 type Env = Record<string, string | undefined>
 
 /**
  * `given` (the call's `env`, or the parent's when it had none) with the
- * recorder preloaded and a file to report to; `null` when the caller asked
+ * recorder preloaded and a directory to report to; `null` when the caller asked
  * for a child free of node options with `env: { ...process.env, NODE_OPTIONS:
  * undefined }`, which is left alone.
  */
@@ -123,7 +162,7 @@ function recordedEnv(
 		given.NODE_OPTIONS === undefined
 	if (cleared) return null
 	const env: Env = { ...(given ?? process.env) }
-	const file = recordFile()
+	const file = recordDir()
 	env[CHILD_RECORD_ENV] = file
 	env.NODE_OPTIONS = [
 		env.NODE_OPTIONS,
@@ -135,7 +174,7 @@ function recordedEnv(
 }
 
 interface Child {
-	/** The record file the child was given, `null` when nothing is being recorded. */
+	/** The record directory the child was given, `null` when nothing is being recorded. */
 	file: string | null
 	cwd: string
 	/** The test file that started it; what it reports counts only while that file runs. */
@@ -175,7 +214,7 @@ function optionsOf(args: unknown[]): Record<string, unknown> {
 
 /**
  * Prepares a `child_process` call: the child gets the recorder preloaded and
- * a file to report to, and the command plus every argument naming a file is
+ * a directory to report to, and the command plus every argument naming a file is
  * recorded right away, which is all a non-node child (a shell script, a
  * binary) can contribute.
  */
@@ -207,22 +246,28 @@ function instrument(args: unknown[]): Child {
 /** What the child has reported so far, relative to its working directory, while its test file is the one running. */
 function recordReported(child: Child): void {
 	if (child.file === null || child.test !== workerState()?.filepath) return
-	let reported: string
+	let names: string[]
 	try {
-		reported = read(child.file, 'utf8')
+		names = readdir(child.file)
 	} catch {
 		return
 	}
-	for (const line of reported.split('\n')) if (line !== '') record(line, child.cwd)
+	for (const name of names) {
+		let reported: string
+		try {
+			reported = read(path.join(child.file, name), 'utf8')
+		} catch {
+			continue
+		}
+		for (const line of reported.split('\n'))
+			if (line !== '') record(line, child.cwd)
+	}
 }
 
 /** Records what the exited child reported and forgets it. */
 function collect(child: Child): void {
 	if (child.file === null) return
 	recordReported(child)
-	try {
-		unlink(child.file)
-	} catch {}
 	outstanding().delete(child)
 }
 

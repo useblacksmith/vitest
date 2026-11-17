@@ -1,8 +1,11 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import type { Plugin } from 'vitest/config'
 import type { Vitest } from 'vitest/node'
-import { ENV_REPO } from './fs-recorder.js'
+import { ENV_RECORD_ROOT, ENV_REPO } from './fs-recorder.js'
 import { repoRoot } from './git.js'
 
 import {
@@ -57,12 +60,19 @@ export interface BlacksmithOptions {
 	dependencies?: Record<string, string | string[]>
 }
 
+/** Vitest 5.1.0 is the first to hand a VCS provider the dependency records. */
+export function supportsVersion(version: string): boolean {
+	const [major = 0, minor = 0] = version.split('.').map(Number)
+	return major > 5 || (major === 5 && minor >= 1)
+}
+
 /** Whether this Vitest wired up the pieces `--changed` selection relies on. */
 function supportsChanged(vitest: Vitest): boolean {
 	const { vcs } = vitest as { vcs?: { findChangedFiles?: unknown } }
 	const experimental = vitest.config.experimental as
 		{ recordDependencies?: boolean; vcsProvider?: unknown } | undefined
 	return (
+		supportsVersion(vitest.version) &&
 		typeof vcs?.findChangedFiles === 'function' &&
 		experimental?.recordDependencies === true &&
 		isTreeSnapshotProvider(experimental.vcsProvider)
@@ -122,6 +132,15 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 			// cannot cover it, and vitest's record would otherwise keep every
 			// temp file a run touched.
 			process.env[ENV_REPO] ??= await repoRoot(vitest.config.root)
+			if (!process.env[ENV_RECORD_ROOT]) {
+				const root = mkdtempSync(path.join(tmpdir(), 'blacksmith-child-'))
+				process.env[ENV_RECORD_ROOT] = root
+				process.once('exit', () => {
+					try {
+						rmSync(root, { recursive: true, force: true })
+					} catch {}
+				})
+			}
 			// Their sequencer's shards must not depend on which tests the
 			// selection kept, or the provider's view of the shard and vitest's
 			// would differ.
@@ -142,7 +161,21 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 				restored ??= restoreDependencyCache(vitest)
 				await restored
 			}
+			// With `--changed`, vitest measures coverage for the changed files
+			// alone, so thresholds would pass on a run that covers nothing.
+			const covered = !options.shadow && vitest.config.coverage.enabled
+			if (covered && !changedApplied) {
+				changedApplied = true
+				if (!options.runAllTests) {
+					vitest.logger.warn(
+						'[blacksmith] selecting changed tests is not supported with coverage, running every test',
+					)
+				}
+				vitest.config.changed = false
+				vitest.config.coverage.changed = false
+			}
 			if (
+				!covered &&
 				!options.shadow &&
 				!options.runAllTests &&
 				!vitest.config.changed &&
@@ -155,7 +188,7 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 					vitest.config.passWithNoTests = true
 				} else {
 					vitest.logger.warn(
-						'[blacksmith] This vitest version does not support running changed tests with Blacksmith',
+						`[blacksmith] vitest ${vitest.version} cannot select changed tests, running every test; @useblacksmith/vitest needs vitest 5.1.0 or newer`,
 					)
 				}
 			}
@@ -174,7 +207,11 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 				]
 			}
 			const reporters = vitest.config.reporters
-			if (!reporters.some(isSnapshotRecorder)) {
+			// An older vitest keeps no dependency records to snapshot.
+			if (
+				supportsVersion(vitest.version) &&
+				!reporters.some(isSnapshotRecorder)
+			) {
 				reporters.push(new SnapshotRecorder(active, { shadow }))
 			}
 		},
