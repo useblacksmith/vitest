@@ -9,6 +9,8 @@ export const BRAND = Symbol.for('blacksmith.recordReads')
 export const CHILD_RECORD_ENV = 'BLACKSMITH_CHILD_RECORD'
 /** The repository root; a read outside it is not recorded, the anchor cannot cover it. */
 export const ENV_REPO = 'BLACKSMITH_REPO'
+/** Directory, made and removed by the main process, that holds every child record. */
+export const ENV_RECORD_ROOT = 'BLACKSMITH_RECORD_ROOT'
 
 export function toPath(target: unknown): string | null {
 	if (typeof target === 'string') return target

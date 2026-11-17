@@ -1,8 +1,11 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import type { Plugin } from 'vitest/config'
 import type { Vitest } from 'vitest/node'
-import { ENV_REPO } from './fs-recorder.js'
+import { ENV_RECORD_ROOT, ENV_REPO } from './fs-recorder.js'
 import { repoRoot } from './git.js'
 
 import {
@@ -129,6 +132,15 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 			// cannot cover it, and vitest's record would otherwise keep every
 			// temp file a run touched.
 			process.env[ENV_REPO] ??= await repoRoot(vitest.config.root)
+			if (!process.env[ENV_RECORD_ROOT]) {
+				const root = mkdtempSync(path.join(tmpdir(), 'blacksmith-child-'))
+				process.env[ENV_RECORD_ROOT] = root
+				process.once('exit', () => {
+					try {
+						rmSync(root, { recursive: true, force: true })
+					} catch {}
+				})
+			}
 			// Their sequencer's shards must not depend on which tests the
 			// selection kept, or the provider's view of the shard and vitest's
 			// would differ.

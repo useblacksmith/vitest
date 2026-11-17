@@ -9,6 +9,7 @@ import { afterAll } from 'vitest'
 import {
 	BRAND,
 	CHILD_RECORD_ENV,
+	ENV_RECORD_ROOT,
 	copyProperties,
 	isIgnored,
 	wrapReads,
@@ -112,8 +113,6 @@ const RECORD_DIRS = Symbol.for('blacksmith.recordReads.recordDirs')
 interface RecordDirs {
 	root: string
 	byTest: Map<string, string>
-	/** Directories handed out so far, so a name is never reused. */
-	made: number
 }
 
 /**
@@ -124,19 +123,23 @@ interface RecordDirs {
 function recordDir(): string {
 	let dirs = shared[RECORD_DIRS] as RecordDirs | undefined
 	if (!dirs) {
-		const root = mkdtemp(path.join(os.tmpdir(), 'blacksmith-child-'))
-		dirs = shared[RECORD_DIRS] = { root, byTest: new Map(), made: 0 }
-		process.once('exit', () => {
-			try {
-				rm(root, { recursive: true, force: true })
-			} catch {}
-		})
+		// The main process makes and removes the root: vitest may end a
+		// worker with no `exit` event, and a child can outlive the hooks here.
+		const given = process.env[ENV_RECORD_ROOT]
+		const root = given ?? mkdtemp(path.join(os.tmpdir(), 'blacksmith-child-'))
+		dirs = shared[RECORD_DIRS] = { root, byTest: new Map() }
+		if (!given) {
+			process.once('exit', () => {
+				try {
+					rm(root, { recursive: true, force: true })
+				} catch {}
+			})
+		}
 	}
 	const test = workerState()?.filepath ?? ''
 	let dir = dirs.byTest.get(test)
 	if (!dir) {
-		dir = path.join(dirs.root, String(dirs.made++))
-		mkdir(dir)
+		dir = mkdtemp(path.join(dirs.root, 't-'))
 		dirs.byTest.set(test, dir)
 	}
 	return dir
@@ -280,19 +283,6 @@ afterAll(() => {
 		recordReported(child)
 		outstanding().delete(child)
 	}
-	// Everything the file's children reported is read; vitest may end this
-	// worker without an `exit` event, so the directory goes now.
-	const dirs = shared[RECORD_DIRS] as RecordDirs | undefined
-	const dir = dirs?.byTest.get(current ?? '')
-	if (!dirs || !dir) return
-	dirs.byTest.delete(current ?? '')
-	try {
-		rm(dir, { recursive: true, force: true })
-		if (dirs.byTest.size === 0) {
-			rm(dirs.root, { recursive: true, force: true })
-			delete shared[RECORD_DIRS]
-		}
-	} catch {}
 })
 
 type Wrappable = Record<string, unknown>
