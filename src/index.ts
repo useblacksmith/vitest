@@ -57,12 +57,19 @@ export interface BlacksmithOptions {
 	dependencies?: Record<string, string | string[]>
 }
 
+/** Vitest 5.1.0 is the first to hand a VCS provider the dependency records. */
+export function supportsVersion(version: string): boolean {
+	const [major = 0, minor = 0] = version.split('.').map(Number)
+	return major > 5 || (major === 5 && minor >= 1)
+}
+
 /** Whether this Vitest wired up the pieces `--changed` selection relies on. */
 function supportsChanged(vitest: Vitest): boolean {
 	const { vcs } = vitest as { vcs?: { findChangedFiles?: unknown } }
 	const experimental = vitest.config.experimental as
 		{ recordDependencies?: boolean; vcsProvider?: unknown } | undefined
 	return (
+		supportsVersion(vitest.version) &&
 		typeof vcs?.findChangedFiles === 'function' &&
 		experimental?.recordDependencies === true &&
 		isTreeSnapshotProvider(experimental.vcsProvider)
@@ -155,7 +162,7 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 					vitest.config.passWithNoTests = true
 				} else {
 					vitest.logger.warn(
-						'[blacksmith] This vitest version does not support running changed tests with Blacksmith',
+						`[blacksmith] vitest ${vitest.version} cannot select changed tests, running every test; @useblacksmith/vitest needs vitest 5.1.0 or newer`,
 					)
 				}
 			}

@@ -12,3 +12,17 @@ test('child', () => {
 	expect(result.stdout).toContain('lib')
 	expect(result.stdout).toContain('data')
 })
+
+// Two children started the same way see the same environment: nothing the
+// recorder adds may tell them apart.
+test('children share one environment', () => {
+	const env = () =>
+		spawnSync(
+			process.execPath,
+			['-e', 'process.stdout.write(JSON.stringify(process.env))'],
+			{ encoding: 'utf8' },
+		).stdout
+	const first = env()
+	expect(first).not.toBe('')
+	expect(env()).toBe(first)
+})

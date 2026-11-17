@@ -31,15 +31,18 @@ import {
 	headSha,
 	knownPaths,
 	lockfilePaths,
+	pathsUnder,
 	repoRoot,
 	type Tree,
 } from './git.js'
 import { shardOwner } from './sequencer.js'
 
 export const SNAPSHOT_FILE = 'blacksmith.json'
+export const UNSUPPORTED_VITEST =
+	'[blacksmith] @useblacksmith/vitest selects changed tests on Vitest 5.1.0 or newer; upgrade vitest, or set `runAllTests: true` and drop --changed'
 // Bumped whenever the snapshot's shape changes or the records an anchor
 // vouches for gain a kind of dependency, so an older snapshot is not trusted.
-const SNAPSHOT_VERSION = 6
+const SNAPSHOT_VERSION = 7
 
 /** A `dependencies` entry, compiled: test files matching `tests` depend on files matching `deps`; both root-relative. */
 export interface DependencyRule {
@@ -47,6 +50,8 @@ export interface DependencyRule {
 	source: string
 	tests: (file: string) => boolean
 	deps: (file: string) => boolean
+	/** Root-relative directories the `deps` globs start in (`fixtures` for `fixtures/**`), where git-ignored files are looked for; a glob with no fixed start has none. */
+	bases: string[]
 }
 
 /**
@@ -64,16 +69,19 @@ export function compileDependencies(
 		Readonly<Record<string, string | readonly string[]>> | undefined,
 	root: string,
 ): DependencyRule[] {
-	return Object.entries(dependencies ?? {}).map(([tests, deps]) => ({
-		source: tests,
-		tests: picomatch(normalizeGlob(root, tests), { dot: true }),
-		deps: picomatch(
-			(typeof deps === 'string' ? [deps] : [...deps]).map((glob) =>
-				normalizeGlob(root, glob),
-			),
-			{ dot: true },
-		),
-	}))
+	return Object.entries(dependencies ?? {}).map(([tests, deps]) => {
+		const globs = (typeof deps === 'string' ? [deps] : [...deps]).map((glob) =>
+			normalizeGlob(root, glob),
+		)
+		return {
+			source: tests,
+			tests: picomatch(normalizeGlob(root, tests), { dot: true }),
+			deps: picomatch(globs, { dot: true }),
+			bases: globs
+				.map((glob) => picomatch.scan(glob).base)
+				.filter((base) => base !== '' && base !== '.'),
+		}
+	})
 }
 
 /** `file` relative to the config root with `/` separators, the form the `dependencies` globs match. */
@@ -103,6 +111,8 @@ export interface Snapshot {
 	/** Vitest's root relative to the repository, so one package's snapshot never vouches for another's. */
 	root: string
 	shard: Shard | null
+	/** The workflow file and job the run was part of (see `jobId`), '' outside Actions; another job's `env` and steps differ, so it does not share its skips. */
+	job: string
 	/** Names of the projects the run covered (`--project` narrows them). */
 	projects: string[]
 	tree: Tree
@@ -138,6 +148,17 @@ function workflowPath(): string | null {
 	if (!ref || !repository || !ref.startsWith(`${repository}/`)) return null
 	const file = ref.slice(repository.length + 1).split('@')[0] ?? ''
 	return file.startsWith('.github/workflows/') ? file : null
+}
+
+/**
+ * The workflow file and job this run is part of, `.github/workflows/ci.yml#test`;
+ * '' outside Actions. Two jobs run the same tests under different `env` and
+ * steps, so neither trusts the other's snapshot or restores its cache entry.
+ */
+export function jobId(): string {
+	const workflow = workflowPath()
+	const job = process.env.GITHUB_JOB
+	return workflow || job ? `${workflow ?? ''}#${job ?? ''}` : ''
 }
 
 /** `dir` and every parent up to the repository root, repo-relative ('' for the root). */
@@ -274,7 +295,26 @@ async function anchoredPaths(
 		if (dirs.has(repoDir(file))) paths.add(file)
 	}
 	const matched = rules.map(() => 0)
-	for (const file of await knownPaths(repo)) {
+	// Git-ignored files (generated code, downloaded fixtures) a rule names are
+	// looked up under the directories its globs start in, never repo-wide.
+	const bases = new Set<string>()
+	for (const rule of rules) {
+		for (const base of rule.bases) {
+			const relative = repoRelative(repo, path.resolve(vitest.config.root, base))
+			if (
+				relative !== '' &&
+				!relative.startsWith('..') &&
+				!path.isAbsolute(relative)
+			) {
+				bases.add(relative)
+			}
+		}
+	}
+	const candidates = await knownPaths(repo)
+	for (const file of await pathsUnder(repo, [...bases])) {
+		if (!file.split('/').includes('node_modules')) candidates.add(file)
+	}
+	for (const file of candidates) {
 		const fromRoot = rootRelative(vitest.config.root, path.join(repo, file))
 		let byRule = false
 		rules.forEach((rule, index) => {
@@ -352,6 +392,39 @@ async function pruneRecords(
 	await rename(tmp, file)
 }
 
+/**
+ * Vitest reruns a recorded test only when a file in its record changed. A
+ * test that never loaded (a syntax error in it or in a setup file) has a
+ * record that may name nothing, not even the test itself, so handing vitest
+ * the test as changed runs nothing. Without a record vitest always runs it.
+ */
+async function dropUnloadedRecords(
+	vitest: Vitest,
+	dir: string,
+	changed: ReadonlySet<string>,
+): Promise<void> {
+	const records = await readRecords(vitest, dir)
+	if (!records) return
+	const root = vitest.config.root
+	let dropped = false
+	for (const project of Object.values(records.projects ?? {})) {
+		for (const [test, record] of Object.entries(project.files)) {
+			if (!changed.has(path.resolve(root, test))) continue
+			const reruns = record.deps.some((index) =>
+				changed.has(path.resolve(root, project.modules[index] ?? '')),
+			)
+			if (reruns) continue
+			delete project.files[test]
+			dropped = true
+		}
+	}
+	if (!dropped) return
+	const file = path.join(dir, 'dependencies.json')
+	const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
+	await writeFile(tmp, JSON.stringify(records))
+	await rename(tmp, file)
+}
+
 function sameShard(a: Shard | null, b: Shard | undefined): boolean {
 	if (a === null) return b === undefined
 	return b !== undefined && a.index === b.index && a.count === b.count
@@ -385,7 +458,7 @@ async function readSnapshot(file: string): Promise<Snapshot | null> {
 		return null
 	}
 	if (typeof parsed !== 'object' || parsed === null) return null
-	const { version, runtime, head, root, shard, projects, tree, tests } =
+	const { version, runtime, head, root, shard, job, projects, tree, tests } =
 		parsed as Record<string, unknown>
 	if (
 		version !== SNAPSHOT_VERSION ||
@@ -393,6 +466,7 @@ async function readSnapshot(file: string): Promise<Snapshot | null> {
 		typeof head !== 'string' ||
 		typeof root !== 'string' ||
 		!isShard(shard) ||
+		typeof job !== 'string' ||
 		!Array.isArray(projects) ||
 		!projects.every((name) => typeof name === 'string') ||
 		!isTree(tree) ||
@@ -407,6 +481,7 @@ async function readSnapshot(file: string): Promise<Snapshot | null> {
 		head,
 		root,
 		shard,
+		job,
 		projects: projects as string[],
 		tree,
 		tests: tests as string[],
@@ -473,6 +548,7 @@ export class TreeSnapshotProvider implements VCSProvider {
 
 	async findChangedFiles(options: VCSProviderOptions): Promise<string[]> {
 		this.deselected = new Set()
+		if (!options.resolver) throw new Error(UNSUPPORTED_VITEST)
 		const dependencies = await options.resolver.getDependencies()
 		const cacheDir = this.vitest.vite.config.cacheDir
 		const selected = await this.select(
@@ -489,6 +565,7 @@ export class TreeSnapshotProvider implements VCSProvider {
 			return dependencies.map((dependency) => dependency.file)
 		}
 		const changed = new Set(selected)
+		await dropUnloadedRecords(this.vitest, cacheDir, changed)
 		for (const [test, deps] of await recordedDependencies(
 			this.vitest,
 			cacheDir,
@@ -541,6 +618,12 @@ export class TreeSnapshotProvider implements VCSProvider {
 		if (snapshot.projects.join('\n') !== projects.join('\n')) {
 			log(
 				`dependency snapshot covers projects [${snapshot.projects.join(', ')}], this run covers [${projects.join(', ')}], running every test of the ${describeShard(shard)}`,
+			)
+			return null
+		}
+		if (snapshot.job !== jobId()) {
+			log(
+				`dependency snapshot was made by ${snapshot.job || 'a run outside Actions'}, this is ${jobId() || 'a run outside Actions'}, running every test of the ${describeShard(shard)}`,
 			)
 			return null
 		}
@@ -695,6 +778,7 @@ export class ShadowAnalysis {
 			snapshotVersion: SNAPSHOT_VERSION,
 			runtime: runtimeId(),
 			root: repoRelative(repo, vitest.config.root),
+			job: jobId(),
 			projects: projectNames(vitest),
 			shard: vitest.config.shard ?? null,
 			head: process.env.GITHUB_SHA || (await headSha(repo)),
@@ -827,6 +911,8 @@ export class SnapshotRecorder implements Reporter {
 	private vitest!: Vitest
 	private started = new Set<string>()
 	private partial = false
+	/** Tests a run vouches for once its coverage thresholds have passed. */
+	private pending: string[] | null = null
 
 	constructor(
 		private readonly provider: TreeSnapshotProvider,
@@ -921,6 +1007,43 @@ export class SnapshotRecorder implements Reporter {
 				`[blacksmith] ${covered.left.length} failed test files left out of the dependency snapshot, they run again next time`,
 			)
 		}
+		// Vitest checks coverage thresholds after this hook and fails the run
+		// through the exit code alone; the snapshot waits for that verdict.
+		if (this.checksThresholds(modules)) {
+			this.pending =
+				process.exitCode === undefined || process.exitCode === 0
+					? covered.vouched
+					: null
+			return
+		}
+		await this.write(covered.vouched)
+	}
+
+	/** Whether vitest is about to report coverage and check `coverage.thresholds`. */
+	private checksThresholds(modules: ReadonlyArray<TestModule>): boolean {
+		const coverage = this.vitest.config.coverage
+		if (!coverage.enabled || !coverage.thresholds) return false
+		return (
+			coverage.reportOnFailure === true ||
+			modules.every((module) => module.ok())
+		)
+	}
+
+	/** Called by vitest once coverage is reported and its thresholds checked. */
+	async onFinishedReportCoverage(): Promise<void> {
+		const vouched = this.pending
+		this.pending = null
+		if (vouched === null) return
+		if (process.exitCode !== undefined && process.exitCode !== 0) {
+			this.vitest.logger.log(
+				'[blacksmith] coverage thresholds failed, the dependency snapshot is left as it was',
+			)
+			return
+		}
+		await this.write(vouched)
+	}
+
+	private async write(vouched: readonly string[]): Promise<void> {
 		const cacheDir = this.vitest.vite.config.cacheDir
 		const { root, shard } = this.vitest.config
 		const repo = await repoRoot(root)
@@ -931,6 +1054,7 @@ export class SnapshotRecorder implements Reporter {
 			head: await headSha(repo),
 			root: repoRelative(repo, root),
 			shard: shard ?? null,
+			job: jobId(),
 			projects: projectNames(this.vitest),
 			tree: await anchorTree(
 				repo,
@@ -941,7 +1065,7 @@ export class SnapshotRecorder implements Reporter {
 					this.provider.dependencies,
 				),
 			),
-			tests: covered.vouched.map((file) => repoRelative(repo, file)).sort(),
+			tests: vouched.map((file) => repoRelative(repo, file)).sort(),
 		}
 		const file = snapshotPath(this.vitest, cacheDir)
 		await mkdir(path.dirname(file), { recursive: true })
@@ -959,6 +1083,7 @@ export class SnapshotRecorder implements Reporter {
 			snapshotVersion: snapshot.version,
 			runtime: snapshot.runtime,
 			root: snapshot.root,
+			job: snapshot.job,
 			projects: snapshot.projects,
 			shard: snapshot.shard,
 			head: snapshot.head,
@@ -1059,6 +1184,7 @@ export async function restoreDependencyCache(vitest: Vitest): Promise<void> {
 		snapshotVersion: SNAPSHOT_VERSION,
 		runtime: runtimeId(),
 		root: repoRelative(repo, vitest.config.root),
+		job: jobId(),
 		projects: projectNames(vitest),
 		shard: vitest.config.shard ?? null,
 		head: process.env.GITHUB_SHA || (await headSha(repo)),

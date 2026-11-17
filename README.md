@@ -59,12 +59,14 @@ The plugin uses Vitest's dependency tracking: each run records which modules and
 |---|---|---|
 | `runAllTests` | `false` | Run every test instead of the affected selection. |
 | `shadow` | `false` | Run every test, but log what the affected selection would have run and which failing test files it would have skipped, i.e. failures the selection would have missed. Use it to evaluate the plugin on a repo before relying on the selection. |
-| `dependencies` | `{}` | Dependencies the tracking cannot see, as globs of test files mapped to the glob(s) of the files they depend on, relative to the config root (`../shared/**` reaches outside a package): `{ 'tests/**/*.spec.ts': 'fixtures/**' }`. A change to a matching file reruns the mapped tests; a glob that matches no file in the repository warns. |
+| `dependencies` | `{}` | Dependencies the tracking cannot see, as globs of test files mapped to the glob(s) of the files they depend on, relative to the config root (`../shared/**` reaches outside a package): `{ 'tests/**/*.spec.ts': 'fixtures/**' }`. A change to a matching file reruns the mapped tests, git-ignored files (generated code, build output) included; a glob that matches no file in the repository warns. |
 
 ## Caveats
 
 - **Only dependencies the test reaches through node are tracked.** `import`, `require`, and `fs` are tracked automatically, in the test process, in every node process it starts through `child_process` and in every `worker_threads` worker (each gets a preloaded recorder; their own children inherit it). A child or worker records what it has loaded as it goes, so one the test kills or terminates still counts, up to the end of its test file. For any child, the command and the arguments that name files are recorded too. A child started with `env: { ..., NODE_OPTIONS: undefined }`, or a worker with `env: SHARE_ENV`, gets no recorder, only its command line. Files read by `globalSetup`, by non-node programs, or build outputs a child runs in place of their sources are not; declare them with the `dependencies` option. In browser mode, vitest itself reports nothing, so the plugin records the modules the browser loaded from the project's Vite module graph instead; files a browser test fetches at run time are not tracked.
 - **Shards must be stable for maximal efficacy.** The plugin assigns test files to shards by a hash of their path, so a file stays in its shard as others are added or removed. A custom `test.sequence.sequencer` is honoured, but every test that moves to another shard reruns there.
+- **Each workflow job keeps its own record.** A job only skips tests that an earlier run of the same job in the same workflow file passed, since another job may run them under a different `env` or setup. The first run of a new or renamed job runs everything.
+- **A run that fails its coverage thresholds saves nothing**, so the tests behind the shortfall run again next time.
 
 ## Development
 

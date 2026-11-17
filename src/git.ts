@@ -78,6 +78,13 @@ export function knownPaths(repo: string): Promise<Set<string>> {
 	return listKnown(repo, ['.'], false)
 }
 
+/** Every file under the directories `dirs`, git-ignored ones included. */
+export function pathsUnder(repo: string, dirs: string[]): Promise<Set<string>> {
+	return dirs.length === 0
+		? Promise.resolve(new Set())
+		: listKnown(repo, dirs, true, true)
+}
+
 /**
  * Paths git would show for the pathspecs: tracked files still on disk and
  * untracked files not ignored, so a directory's listing is what `git status`

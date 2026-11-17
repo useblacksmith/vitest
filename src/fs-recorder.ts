@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 /** Marks a function this module already wrapped, so a second load leaves it alone. */
 export const BRAND = Symbol.for('blacksmith.recordReads')
 
-/** Set in a child process's environment: the file its recorder appends the paths it loaded or read to. */
+/** Set in a child process's environment: the directory its recorder writes the paths it loaded or read to, the same for every child of one test file. */
 export const CHILD_RECORD_ENV = 'BLACKSMITH_CHILD_RECORD'
 /** The repository root; a read outside it is not recorded, the anchor cannot cover it. */
 export const ENV_REPO = 'BLACKSMITH_REPO'
