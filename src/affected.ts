@@ -425,6 +425,11 @@ async function dropUnloadedRecords(
 	await rename(tmp, file)
 }
 
+/** Whether the run is already set to exit non-zero. */
+function failing(): boolean {
+	return process.exitCode !== undefined && process.exitCode !== 0
+}
+
 function sameShard(a: Shard | null, b: Shard | undefined): boolean {
 	if (a === null) return b === undefined
 	return b !== undefined && a.index === b.index && a.count === b.count
@@ -1008,12 +1013,10 @@ export class SnapshotRecorder implements Reporter {
 			)
 		}
 		// Vitest checks coverage thresholds after this hook and fails the run
-		// through the exit code alone; the snapshot waits for that verdict.
-		if (this.checksThresholds(modules)) {
-			this.pending =
-				process.exitCode === undefined || process.exitCode === 0
-					? covered.vouched
-					: null
+		// through the exit code alone; the snapshot waits for that verdict. A run
+		// already failing hides it, and writes now so its failed tests rerun.
+		if (this.checksThresholds(modules) && !failing()) {
+			this.pending = covered.vouched
 			return
 		}
 		await this.write(covered.vouched)
@@ -1034,10 +1037,13 @@ export class SnapshotRecorder implements Reporter {
 		const vouched = this.pending
 		this.pending = null
 		if (vouched === null) return
-		if (process.exitCode !== undefined && process.exitCode !== 0) {
+		if (failing()) {
+			// An empty snapshot, not none: a fresh checkout would otherwise
+			// restore an older one that vouches for these tests.
 			this.vitest.logger.log(
-				'[blacksmith] coverage thresholds failed, the dependency snapshot is left as it was',
+				'[blacksmith] coverage thresholds failed, the dependency snapshot vouches for no test and the next run runs them all',
 			)
+			await this.write([])
 			return
 		}
 		await this.write(vouched)

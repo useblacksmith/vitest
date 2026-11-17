@@ -112,6 +112,8 @@ const RECORD_DIRS = Symbol.for('blacksmith.recordReads.recordDirs')
 interface RecordDirs {
 	root: string
 	byTest: Map<string, string>
+	/** Directories handed out so far, so a name is never reused. */
+	made: number
 }
 
 /**
@@ -123,7 +125,7 @@ function recordDir(): string {
 	let dirs = shared[RECORD_DIRS] as RecordDirs | undefined
 	if (!dirs) {
 		const root = mkdtemp(path.join(os.tmpdir(), 'blacksmith-child-'))
-		dirs = shared[RECORD_DIRS] = { root, byTest: new Map() }
+		dirs = shared[RECORD_DIRS] = { root, byTest: new Map(), made: 0 }
 		process.once('exit', () => {
 			try {
 				rm(root, { recursive: true, force: true })
@@ -133,7 +135,7 @@ function recordDir(): string {
 	const test = workerState()?.filepath ?? ''
 	let dir = dirs.byTest.get(test)
 	if (!dir) {
-		dir = path.join(dirs.root, String(dirs.byTest.size))
+		dir = path.join(dirs.root, String(dirs.made++))
 		mkdir(dir)
 		dirs.byTest.set(test, dir)
 	}
@@ -278,6 +280,19 @@ afterAll(() => {
 		recordReported(child)
 		outstanding().delete(child)
 	}
+	// Everything the file's children reported is read; vitest may end this
+	// worker without an `exit` event, so the directory goes now.
+	const dirs = shared[RECORD_DIRS] as RecordDirs | undefined
+	const dir = dirs?.byTest.get(current ?? '')
+	if (!dirs || !dir) return
+	dirs.byTest.delete(current ?? '')
+	try {
+		rm(dir, { recursive: true, force: true })
+		if (dirs.byTest.size === 0) {
+			rm(dirs.root, { recursive: true, force: true })
+			delete shared[RECORD_DIRS]
+		}
+	} catch {}
 })
 
 type Wrappable = Record<string, unknown>

@@ -11,6 +11,7 @@ import {
 	rmSync,
 	writeFileSync,
 } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import {
@@ -241,6 +242,11 @@ describe('--changed against the tree snapshot', () => {
 	})
 
 	test('a child process records the script it runs, what that imports and what it reads', async () => {
+		const leftover = () =>
+			readdirSync(tmpdir()).filter((name) =>
+				name.startsWith('blacksmith-child-'),
+			)
+		const before = leftover()
 		const edits: [string, string][] = [
 			['src/scripts/child-lib.mjs', "export const lib = 'lib' // edited\n"],
 			['src/fixtures/child/data.txt', 'data edited\n'],
@@ -257,6 +263,7 @@ describe('--changed against the tree snapshot', () => {
 			repo.commit(`edit ${file}`)
 		}
 		expect((await repo.run('--changed')).ran).toEqual([])
+		expect(leftover()).toEqual(before)
 	})
 
 	test('a child the test kills and a worker thread it terminates still record what they loaded', async () => {
@@ -896,7 +903,7 @@ describe('what a snapshot may vouch for', () => {
 		expect((await repo.run('--changed')).ran).toEqual([])
 	})
 
-	test('a run that fails only its coverage thresholds writes no snapshot', async () => {
+	test('a run that fails only its coverage thresholds vouches for no test', async () => {
 		const repo = new Repo('thresholds')
 		// src/scripts only runs in child processes, which v8 coverage does not see.
 		const coverage = ['--coverage', '--coverage.include=src/**']
@@ -906,11 +913,19 @@ describe('what a snapshot may vouch for', () => {
 		)
 		expect(failed.exitCode, failed.output).toBe(1)
 		expect(failed.output).toContain('coverage thresholds failed')
-		expect(repo.snapshot()).toBeNull()
+		expect(repo.snapshot()?.tests).toEqual([])
 		const next = await repo.run('--changed', ...coverage)
 		expect(next.ran).toEqual([...TESTS].sort())
 		expect(next.exitCode, next.output).toBe(0)
-		expect(repo.snapshot()).not.toBeNull()
+		expect(repo.snapshot()?.tests).toHaveLength(TESTS.length)
+		// A snapshot that vouched for every test stops doing so.
+		const again = await repo.run(
+			...coverage,
+			'--coverage.thresholds.lines=100',
+		)
+		expect(again.exitCode, again.output).toBe(1)
+		expect(repo.snapshot()?.tests).toEqual([])
+		expect((await repo.run('--changed')).ran).toEqual([...TESTS].sort())
 	})
 
 	test('a run that owns no test file writes no snapshot', async () => {
