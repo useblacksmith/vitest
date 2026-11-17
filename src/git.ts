@@ -107,7 +107,8 @@ async function listKnown(
 			'--cached',
 			'--others',
 			'--deleted',
-			...(ignored ? [] : ['--exclude-standard']),
+			// Excluding the directory keeps git from walking into it at all.
+			...(ignored ? ['--exclude=node_modules/'] : ['--exclude-standard']),
 			'--',
 			...pathspecs.slice(i, i + 500),
 		])
