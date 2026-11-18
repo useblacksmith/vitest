@@ -28,6 +28,7 @@ import { SNAPSHOT_FILE, type Snapshot } from '../src/affected.ts'
 import { cacheKey, runtimeId } from '../src/cache.ts'
 import { anchorTree, blobsAt, diffTrees } from '../src/git.ts'
 import { supportsVersion } from '../src/index.ts'
+import { recordsNatively } from '../src/records.ts'
 import { shardFor } from '../src/sequencer.ts'
 import { packageRoot } from './harness.ts'
 
@@ -738,6 +739,18 @@ describe('snapshot is only written by runs that cover the shard', () => {
 		const dirty = await repo.run('--changed')
 		expect(dirty.exitCode, dirty.output).toBe(0)
 		expect(dirty.ran).toEqual([])
+	})
+})
+
+describe('env files', () => {
+	// Vitest 5.1's own record leaves out an env file that is not there.
+	test.skipIf(recordsNatively(vitestVersion))('one created after the record reruns every test', async () => {
+		const repo = new Repo('env')
+		const first = await repo.run()
+		expect(first.exitCode, first.output).toBe(0)
+		expect((await repo.run('--changed')).ran).toEqual([])
+		repo.write('.env.local', 'VITE_CREATED=1\n')
+		expect((await repo.run('--changed')).ran).toEqual(first.ran)
 	})
 })
 

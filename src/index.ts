@@ -212,6 +212,9 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 			if (
 				!options.shadow &&
 				vitest.config.changed &&
+				// `vitest related <files>` names sources, not tests: vitest
+				// skips the provider and needs its graph to find their tests.
+				!vitest.config.related?.length &&
 				supportsChanged(vitest) &&
 				dependencyStore(vitest)
 			) {

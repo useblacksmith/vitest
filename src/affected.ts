@@ -795,6 +795,22 @@ async function affectedTests(
 	if (dependsOnChange(vitest.vite.config.configFileDependencies)) {
 		return { wouldRun: 'all', reason: 'a dependency of the config changed' }
 	}
+	// The root's globalSetup runs for every project, and is recorded under
+	// the root project even when that one has no tests of its own.
+	const rootProject = vitest.getRootProject()
+	if (
+		dependencyStore(vitest) &&
+		!vitest.projects.includes(rootProject) &&
+		rootProject.config.globalSetup.length > 0
+	) {
+		const record = records?.projects[rootProject.name]
+		const setup = record?.globalSetup?.deps.map((index) =>
+			path.resolve(vitest.config.root, record.modules[index] ?? ''),
+		)
+		if (setup && dependsOnChange(setup)) {
+			return { wouldRun: 'all', reason: 'a dependency of globalSetup changed' }
+		}
+	}
 	const wouldRun = new Set<string>()
 	for (const project of vitest.projects) {
 		const specs = specifications.filter(

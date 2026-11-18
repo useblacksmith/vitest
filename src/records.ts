@@ -190,13 +190,16 @@ export class DependencyStore {
 		projects.add(this.vitest.getRootProject())
 		for (const project of projects) {
 			const entry = projectRecords(project.name)
+			// Env files stay in when absent: one created later is a change.
 			const config = [
 				...new Set([
-					...(this.vitest.vite.config.configFileDependencies ?? []),
-					...(project.vite.config.configFileDependencies ?? []),
+					...[
+						...(this.vitest.vite.config.configFileDependencies ?? []),
+						...(project.vite.config.configFileDependencies ?? []),
+					].filter((file) => existsSync(file)),
 					...envFiles(project),
 				]),
-			].filter((file) => existsSync(file))
+			]
 			entry.config = { at, deps: intern(entry, config) }
 			const globalSetup = globalSetupFiles(project)
 			if (globalSetup.length > 0) {
