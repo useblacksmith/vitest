@@ -975,11 +975,22 @@ export class SnapshotRecorder implements Reporter {
 	private async reportFiltered(): Promise<void> {
 		if (this.options.shadow) return
 		const owns = await shardOwner(this.vitest)
-		const filtered = [...this.activeProvider().deselected].filter(
-			(file) => owns(file) && !this.started.has(file),
-		).length
+		const { deselected } = this.activeProvider()
+		// Vitest reports every shard's specifications as started, and the
+		// record holds tests of other project sets and deleted files.
+		const owned = new Set(
+			(await this.vitest.globTestSpecifications())
+				.map((specification) => specification.moduleId)
+				.filter(owns),
+		)
+		let ran = 0
+		let filtered = 0
+		for (const file of owned) {
+			if (this.started.has(file)) ran++
+			else if (deselected.has(file)) filtered++
+		}
 		this.vitest.logger.log(
-			`[blacksmith] filtered out ${filtered} of ${this.started.size + filtered} test files as unaffected, ran ${this.started.size}`,
+			`[blacksmith] filtered out ${filtered} of ${ran + filtered} test files as unaffected, ran ${ran}`,
 		)
 	}
 
