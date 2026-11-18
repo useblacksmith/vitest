@@ -103,7 +103,7 @@ export class TwirpError extends Error {
  * that do not export it.
  */
 export function cacheMode(): { readable: boolean; writable: boolean } {
-	const mode = (process.env.GITHUB_ACTIONS_CACHE_MODE ?? '').trim().toLowerCase()
+	const mode = (process.env.ACTIONS_CACHE_MODE ?? '').trim().toLowerCase()
 	return {
 		readable: mode !== 'none' && mode !== 'write-only',
 		writable: mode !== 'none' && mode !== 'read',

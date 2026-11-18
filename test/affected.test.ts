@@ -1307,7 +1307,7 @@ describe('the dependency record travels through the Actions cache', () => {
 		const readOnly = new Repo('cache-read-only')
 		readOnly.env = {
 			ACTIONS_RESULTS_URL: cache.url,
-			GITHUB_ACTIONS_CACHE_MODE: 'read',
+			ACTIONS_CACHE_MODE: 'read',
 		}
 		const saves = cache.entries.size
 		const run = await readOnly.run()
