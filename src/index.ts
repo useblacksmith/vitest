@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 
 import type { Plugin } from 'vitest/config'
 import type { Vitest } from 'vitest/node'
+import { version as vitestVersion } from 'vitest/node'
 import { ENV_OWN_RECORDS, ENV_RECORD_ROOT, ENV_REPO } from './fs-recorder.js'
 import { dependencyStore, recordsNatively, recordsOwn } from './records.js'
 import { repoRoot } from './git.js'
@@ -100,9 +101,29 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 	let changedApplied = false
 	let restored: Promise<void> | undefined
 	let shadow: ShadowAnalysis | undefined
-	return {
+	const plugin: Plugin = {
 		name: 'blacksmith',
 		config(userConfig) {
+			// Before 5.1 an inline project that does not extend the root config
+			// has none of its plugins, so nothing would record what its tests
+			// load and every run would run them all.
+			if (recordsOwn(vitestVersion)) {
+				const projects = (userConfig as { test?: { projects?: unknown } }).test
+					?.projects
+				for (const project of Array.isArray(projects) ? projects : []) {
+					if (
+						typeof project !== 'object' ||
+						project === null ||
+						project.extends
+					) {
+						continue
+					}
+					const plugins: unknown[] = (project.plugins ??= [])
+					if (Array.isArray(plugins) && !plugins.includes(plugin)) {
+						plugins.push(plugin)
+					}
+				}
+			}
 			// Vite merges this over the user's config, so a sequencer the config
 			// names is kept; `configureVitest` pins its shard assignment.
 			const theirs = customSequencer(
@@ -246,4 +267,5 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 			}
 		},
 	}
+	return plugin
 }

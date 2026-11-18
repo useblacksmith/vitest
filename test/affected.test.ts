@@ -1203,6 +1203,55 @@ describe('--project narrows what a snapshot vouches for', () => {
 	})
 })
 
+describe('projects that do not extend the root config', () => {
+	test('are selected like the ones that do', async () => {
+		const repo = new Repo('plain-projects', 'fixture-projects')
+		repo.write(
+			'vitest.config.ts',
+			readFileSync(path.join(repo.cwd, 'vitest.config.ts'), 'utf8')
+				.replaceAll('extends: true,', '')
+				.replace('runAllTests: true', ''),
+		)
+		repo.write('src/data.txt', 'one\n')
+		repo.write(
+			'src/shared.test.ts',
+			"import { readFileSync } from 'node:fs'\nimport { expect, test } from 'vitest'\n\ntest('shared', () => {\n\texpect(readFileSync(new URL('./data.txt', import.meta.url), 'utf8')).toContain('o')\n})\n",
+		)
+		repo.commit('plain projects')
+		const first = await repo.run()
+		expect(first.exitCode, first.output).toBe(0)
+		expect(first.ran).toEqual(['shared', 'shared'])
+		expect((await repo.run()).ran).toEqual([])
+		repo.write('src/data.txt', 'two\n')
+		expect((await repo.run()).ran).toEqual(['shared', 'shared'])
+	})
+})
+
+describe('globalSetup of a root config that has no tests of its own', () => {
+	// Fails on vitest 5.1.0, main included: its own selection reruns nothing.
+	test.skipIf(recordsNatively(vitestVersion))('reruns every project when a file it loads changes', async () => {
+		const repo = new Repo('root-setup', 'fixture-projects')
+		repo.write(
+			'vitest.config.ts',
+			readFileSync(path.join(repo.cwd, 'vitest.config.ts'), 'utf8')
+				.replace('runAllTests: true', '')
+				.replace('projects: [', "globalSetup: ['./global.ts'],\n\t\tprojects: [")
+				.replaceAll("include: ['src", "globalSetup: [], include: ['src"),
+		)
+		repo.write('global-lib.ts', 'export const value = 1\n')
+		repo.write(
+			'global.ts',
+			"import { value } from './global-lib.ts'\n\nexport default () => void value\n",
+		)
+		repo.commit('root globalSetup')
+		const first = await repo.run()
+		expect(first.exitCode, first.output).toBe(0)
+		expect((await repo.run()).ran).toEqual([])
+		repo.write('global-lib.ts', 'export const value = 2\n')
+		expect((await repo.run()).ran).toEqual(['shared', 'shared'])
+	})
+})
+
 /** In-memory stand-in for the Actions cache service's twirp API plus its blob URLs. */
 function fakeCacheService(): Promise<{
 	server: Server

@@ -807,7 +807,7 @@ async function affectedTests(
 		const setup = record?.globalSetup?.deps.map((index) =>
 			path.resolve(vitest.config.root, record.modules[index] ?? ''),
 		)
-		if (setup && dependsOnChange(setup)) {
+		if (!setup || dependsOnChange(setup)) {
 			return { wouldRun: 'all', reason: 'a dependency of globalSetup changed' }
 		}
 	}
