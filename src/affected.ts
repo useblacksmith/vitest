@@ -922,7 +922,12 @@ export class ShadowAnalysis {
 			head: process.env.GITHUB_SHA || (await headSha(repo)),
 		})
 		const dir = await mkdtemp(path.join(tmpdir(), 'blacksmith-shadow-'))
-		const outcome = await restoreBundle(base, dir, key)
+		const outcome = await restoreBundle(
+			base,
+			dir,
+			key,
+			path.basename(recordsPath(vitest, dir)),
+		)
 		if (!outcome.restored) return none(outcome.reason)
 		const snapshot = await readSnapshot(snapshotPath(vitest, dir))
 		const recorded = await recordedDependencies(vitest, dir)
@@ -1215,6 +1220,9 @@ export class SnapshotRecorder implements Reporter {
 				base,
 				this.vitest.vite.config.cacheDir,
 				key,
+				path.basename(
+					recordsPath(this.vitest, this.vitest.vite.config.cacheDir),
+				),
 			)
 			this.vitest.logger.log(
 				outcome.saved
@@ -1312,7 +1320,12 @@ export async function restoreDependencyCache(vitest: Vitest): Promise<void> {
 		head: process.env.GITHUB_SHA || (await headSha(repo)),
 	})
 	try {
-		const outcome = await restoreBundle(base, vitest.vite.config.cacheDir, key)
+		const outcome = await restoreBundle(
+			base,
+			vitest.vite.config.cacheDir,
+			key,
+			path.basename(recordsPath(vitest, vitest.vite.config.cacheDir)),
+		)
 		vitest.logger.log(
 			outcome.restored
 				? `[blacksmith] restored dependency cache ${outcome.key}`

@@ -105,11 +105,22 @@ export type RestoreOutcome =
 	| { restored: true; key: string; files: number }
 	| { restored: false; reason: string }
 
-/** Fetches the newest bundle under `prefix` (exact `key` first) into `cacheDir`. */
+/**
+ * Whether `name` travels in a bundle of the run that keeps `records`: the
+ * record of another vitest stays behind, where a later save would otherwise
+ * pair it with an anchor it does not belong to.
+ */
+function travels(name: string, records: string): boolean {
+	if (!RECORD_FILE.test(name)) return false
+	return !/^(blacksmith-)?dependencies\.json$/.test(name) || name === records
+}
+
+/** Fetches the newest bundle under `prefix` (exact `key` first) into `cacheDir`; `records` is the record file this vitest reads. */
 export async function restoreBundle(
 	base: string,
 	cacheDir: string,
 	{ key, prefix }: CacheKey,
+	records: string,
 ): Promise<RestoreOutcome> {
 	const lookup = await twirp<Record<string, unknown>>(
 		base,
@@ -135,7 +146,7 @@ export async function restoreBundle(
 	}
 	await mkdir(cacheDir, { recursive: true })
 	for (const [name, content] of Object.entries(bundle.files)) {
-		if (!RECORD_FILE.test(name)) continue
+		if (!travels(name, records)) continue
 		await writeFile(path.join(cacheDir, name), content)
 	}
 	const matched = field(lookup, 'matched_key', 'matchedKey')
@@ -154,10 +165,11 @@ export async function saveBundle(
 	base: string,
 	cacheDir: string,
 	{ key }: CacheKey,
+	records: string,
 ): Promise<SaveOutcome> {
 	const files: Record<string, string> = {}
 	for (const name of await readdir(cacheDir)) {
-		if (RECORD_FILE.test(name))
+		if (travels(name, records))
 			files[name] = await readFile(path.join(cacheDir, name), 'utf8')
 	}
 	const body = gzipSync(

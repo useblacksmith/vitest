@@ -1376,6 +1376,34 @@ describe('the dependency record travels through the Actions cache', () => {
 		expect(dirty.ran).toEqual(['five'])
 	})
 
+	test("another vitest's record left in the cache dir does not travel in the bundle", async () => {
+		const cacheDir = (repo: Repo) =>
+			path.join(
+				repo.cwd,
+				'node_modules/.vite/vitest/da39a3ee5e6b4b0d3255bfef95601890afd80709',
+			)
+		const other = recordsNatively(vitestVersion)
+			? OWN_RECORDS_FILE
+			: 'dependencies.json'
+		const producer = new Repo('cache-foreign-producer')
+		producer.env = { ACTIONS_RESULTS_URL: cache.url }
+		producer.write('NOTES.md', 'foreign\n')
+		producer.commit('notes')
+		mkdirSync(cacheDir(producer), { recursive: true })
+		writeFileSync(path.join(cacheDir(producer), other), '{}')
+		expect((await producer.run()).output).toContain('saved dependency cache')
+
+		const consumer = new Repo('cache-foreign-consumer')
+		consumer.env = { ACTIONS_RESULTS_URL: cache.url }
+		consumer.write('NOTES.md', 'foreign\n')
+		consumer.commit('notes')
+		const restored = await consumer.run('--changed')
+		expect(restored.output).toContain('restored dependency cache')
+		expect(restored.ran).toEqual([])
+		expect(existsSync(path.join(cacheDir(consumer), recordsFile))).toBe(true)
+		expect(existsSync(path.join(cacheDir(consumer), other))).toBe(false)
+	})
+
 	test('shadow mode runs everything, reports what the selection would have run, and keeps the cache warm', async () => {
 		const producer = new Repo('shadow-producer')
 		producer.env = { ACTIONS_RESULTS_URL: cache.url }
