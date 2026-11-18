@@ -118,13 +118,15 @@ function effectOf(fs: typeof FS, flags: unknown, fallback: Effect): Effect {
 	if (typeof flags === 'string') {
 		if (flags.includes('x') || flags.includes('a')) return 'keep'
 		if (flags.includes('w')) return 'replace'
-		return flags.includes('+') ? 'keep' : 'read'
+		// `r+` creates nothing: it needs the file that is there.
+		return 'read'
 	}
 	if (typeof flags !== 'number') return fallback
-	const { O_APPEND, O_EXCL, O_RDWR, O_TRUNC, O_WRONLY } = fs.constants
+	const { O_APPEND, O_CREAT, O_EXCL, O_RDWR, O_TRUNC, O_WRONLY } = fs.constants
 	if ((flags & (O_WRONLY | O_RDWR)) === 0) return 'read'
 	if ((flags & (O_EXCL | O_APPEND)) !== 0) return 'keep'
-	return (flags & O_TRUNC) !== 0 ? 'replace' : 'keep'
+	if ((flags & O_TRUNC) !== 0) return 'replace'
+	return (flags & O_CREAT) !== 0 ? 'keep' : 'read'
 }
 
 /** The `flag` (`writeFile`) or `flags` (`createWriteStream`) of an options argument. */
