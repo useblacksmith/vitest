@@ -78,7 +78,7 @@ function globalSetupFiles(project: TestProject): string[] {
 	const graph = (
 		project as unknown as { runner?: { evaluatedModules?: ModuleGraph } }
 	).runner?.evaluatedModules
-	if (!graph) return [...files]
+	if (!graph) return [...files].filter(isRecordable)
 	const queue: ModuleNode[] = setups.flatMap((file) => [
 		...(graph.getModulesByFile(file) ?? []),
 	])
@@ -93,7 +93,12 @@ function globalSetupFiles(project: TestProject): string[] {
 			if (imported) queue.push(imported)
 		}
 	}
-	return [...files]
+	return [...files].filter(isRecordable)
+}
+
+/** Installed packages change with the lockfile, which reruns everything. */
+function isRecordable(file: string): boolean {
+	return path.isAbsolute(file) && !file.includes('node_modules')
 }
 
 /** The plugin's own dependency record, for a Vitest that keeps none. */
@@ -112,9 +117,7 @@ export class DependencyStore {
 		if (!files) this.recorded.set(project.name, (files = new Map()))
 		files.set(
 			filepath,
-			dependencies.filter(
-				(file) => path.isAbsolute(file) && !file.includes('node_modules'),
-			),
+			dependencies.filter(isRecordable),
 		)
 	}
 

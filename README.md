@@ -53,6 +53,8 @@ plugins: [blacksmith({ runAllTests: !process.env.CI })],
 
 The plugin uses Vitest's dependency tracking: each run records which modules and files every test depends on, and the next run compares the checkout against that record to calculate the impacted test set; a test the last successful run did not cover always runs. The record is stored in the Actions cache when run on Blacksmith, so runs on different runners pick up where the last successful run left off.
 
+Each run ends with a line saying how much it skipped: `[blacksmith] filtered out 512 of 540 test files as unaffected, ran 28`.
+
 ## Options
 
 | option | default | effect |

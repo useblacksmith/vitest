@@ -1,4 +1,4 @@
-import { createRequire, syncBuiltinESMExports } from 'node:module'
+import { createRequire, isBuiltin, syncBuiltinESMExports } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -379,6 +379,9 @@ function writeOwnRecord(): void {
 	const file = workerRecordPath(root, state.config?.name ?? '', state.filepath)
 	mkdir(path.dirname(file), { recursive: true })
 	write(file, JSON.stringify([...files]))
+	// A worker that runs its next file without evaluating this one again
+	// must not charge that file with these reads.
+	state.dependencies = new Set()
 }
 
 type Wrappable = Record<string, unknown>
@@ -526,4 +529,41 @@ wrapWorker()
 const required = (
 	globalThis as { __vitest_required__?: { syncBuiltinESMExports?: () => void } }
 ).__vitest_required__
-;(required?.syncBuiltinESMExports ?? syncBuiltinESMExports)()
+if (required?.syncBuiltinESMExports) required.syncBuiltinESMExports()
+else {
+	syncBuiltinESMExports()
+	syncContextBuiltins()
+}
+
+/**
+ * A `vm` pool older than vitest 5.1 has no resync: a builtin the context
+ * imported before this file ran keeps the functions it had then, which in a
+ * thread's first test file are the unwrapped ones.
+ */
+function syncContextBuiltins(): void {
+	const cache = (
+		globalThis as {
+			__vitest_vm_context__?: {
+				externalModulesExecutor?: {
+					cjs?: { moduleCache?: Map<string, unknown> }
+				}
+			}
+		}
+	).__vitest_vm_context__?.externalModulesExecutor?.cjs?.moduleCache
+	// A Map of the outer realm: `instanceof` fails from inside the context.
+	if (typeof cache?.entries !== 'function') return
+	for (const [identifier, module] of cache.entries()) {
+		if (!isBuiltin(identifier)) continue
+		const setExport = (module as { setExport?: unknown }).setExport
+		if (typeof setExport !== 'function') continue
+		const exports = require(identifier) as Record<string, unknown>
+		for (const key of Object.keys(exports)) {
+			try {
+				setExport.call(module, key, exports[key])
+			} catch {
+				// Not evaluated yet (it reads the builtin when it is), or a
+				// key the module was not created with.
+			}
+		}
+	}
+}
