@@ -10,6 +10,7 @@ import {
 	BRAND,
 	CHILD_RECORD_ENV,
 	ENV_OWN_RECORDS,
+	FINAL_SUFFIX,
 	ENV_RECORD_ROOT,
 	Outputs,
 	WRITE_PREFIX,
@@ -391,6 +392,14 @@ function recordedFiles(
 	return files
 }
 
+// The main process may read a record while its worker finishes it: the
+// rename keeps it from ever seeing half of one.
+function writeRecord(file: string, files: Set<string>): void {
+	const partial = `${file}.${process.pid}.${workerThreads.threadId}.tmp`
+	write(partial, JSON.stringify([...files]))
+	fs.renameSync(partial, file)
+}
+
 /**
  * Writes the last test file's record again with what it loaded and read
  * after this file's `afterAll`: teardown that runs later (a `beforeAll`
@@ -403,7 +412,9 @@ function finishPendingRecord(): void {
 	for (const file of record.late) record.files.add(file)
 	recordedFiles(record.graph, [record.test, ...record.setupFiles], record.files)
 	try {
-		write(record.file, JSON.stringify([...record.files]))
+		writeRecord(record.file, record.files)
+		// Tells the main process this record has all of the file's teardown.
+		write(`${record.file}${FINAL_SUFFIX}`, '')
 	} catch {}
 }
 
@@ -437,7 +448,8 @@ function writeOwnRecord(): void {
 	)
 	const file = workerRecordPath(root, state.config?.name ?? '', state.filepath)
 	mkdir(path.dirname(file), { recursive: true })
-	write(file, JSON.stringify([...files]))
+	rm(`${file}${FINAL_SUFFIX}`, { force: true })
+	writeRecord(file, files)
 	// What is read from here on is still this file's until the worker starts
 	// its next one, and never that one's.
 	const late = new Set<string>()

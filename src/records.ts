@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
-import { workerRecordPath } from './fs-recorder.js'
+import { FINAL_SUFFIX, workerRecordPath } from './fs-recorder.js'
 
 import type { TestModule, TestProject, Vitest } from 'vitest/node'
 
@@ -130,6 +130,8 @@ function watchedFiles(project: TestProject, files: string[]): string[] {
 }
 
 /** The plugin's own record on a Vitest that keeps none, where no Vitest reads it. */
+const FINAL_WAIT_MS = 2000
+
 export const OWN_RECORDS_FILE = 'blacksmith-dependencies.json'
 
 /** The dependency record in `dir`: Vitest's `dependencies.json`, or the plugin's own file. */
@@ -174,6 +176,13 @@ export class DependencyStore {
 			module.project.name,
 			module.moduleId,
 		)
+		// Vitest stops a worker without waiting for it, so the record may
+		// still be the one from before the file's teardown.
+		const deadline = Date.now() + FINAL_WAIT_MS
+		while (!existsSync(`${file}${FINAL_SUFFIX}`) && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 10))
+		}
+		await rm(`${file}${FINAL_SUFFIX}`, { force: true })
 		let dependencies: unknown
 		try {
 			dependencies = JSON.parse(await readFile(file, 'utf8'))

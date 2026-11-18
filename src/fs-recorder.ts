@@ -13,6 +13,8 @@ export const ENV_REPO = 'BLACKSMITH_REPO'
 /** Directory, made and removed by the main process, that holds every child record. */
 export const ENV_RECORD_ROOT = 'BLACKSMITH_RECORD_ROOT'
 /** Set when vitest keeps no dependency record and the workers write the plugin's. */
+/** Beside a worker's record once the worker has finished it. */
+export const FINAL_SUFFIX = '.final'
 export const ENV_OWN_RECORDS = 'BLACKSMITH_OWN_RECORDS'
 
 /** Starts a line of a child's record that names a path the child wrote, not one it read. */
