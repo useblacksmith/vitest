@@ -206,6 +206,9 @@ describe('--changed against the tree snapshot', () => {
 		const first = await repo.run()
 		expect(first.exitCode, first.output).toBe(0)
 		expect(first.ran).toEqual([...TESTS].sort())
+		expect(first.output).toContain(
+			`[blacksmith] filtered out 0 of ${TESTS.length} test files as unaffected, ran ${TESTS.length}`,
+		)
 		expect(repo.snapshot()).toMatchObject({
 			version: 7,
 			head: repo.git('rev-parse', 'HEAD').trim(),
@@ -217,12 +220,18 @@ describe('--changed against the tree snapshot', () => {
 		const second = await repo.run('--changed')
 		expect(second.exitCode, second.output).toBe(0)
 		expect(second.ran).toEqual([])
+		expect(second.output).toContain(
+			`[blacksmith] filtered out ${TESTS.length} of ${TESTS.length} test files as unaffected, ran 0`,
+		)
 	})
 
 	test('a dirty dependency reruns only its dependents', async () => {
 		repo.write('src/lib/b.ts', "export const b = 'b' // edited\n")
 		const dirty = await repo.run('--changed')
 		expect(dirty.ran).toEqual(['three', 'two'])
+		expect(dirty.output).toContain(
+			`[blacksmith] filtered out ${TESTS.length - 2} of ${TESTS.length} test files as unaffected, ran 2`,
+		)
 
 		expect((await repo.run('--changed')).ran).toEqual([])
 
@@ -554,13 +563,22 @@ describe('sharding', () => {
 		const two = await repo.run('--shard=2/2')
 		expect(one.ran).toEqual(owned(1, 2))
 		expect(two.ran).toEqual(owned(2, 2))
+		const mine = owned(1, 2).length
+		expect(one.output).toContain(
+			`[blacksmith] filtered out 0 of ${mine} test files as unaffected, ran ${mine}`,
+		)
 		expect([...one.ran, ...two.ran].sort()).toEqual([...TESTS].sort())
 		expect(repo.snapshot(SHARD_1_OF_2)?.shard).toEqual({ index: 1, count: 2 })
 		expect(repo.snapshot(SHARD_2_OF_2)?.shard).toEqual({ index: 2, count: 2 })
 	})
 
 	test("each shard keeps its own snapshot; another shard's is never read", async () => {
-		expect((await repo.run('--changed', '--shard=1/2')).ran).toEqual([])
+		const unchanged = await repo.run('--changed', '--shard=1/2')
+		expect(unchanged.ran).toEqual([])
+		const mine = owned(1, 2).length
+		expect(unchanged.output).toContain(
+			`[blacksmith] filtered out ${mine} of ${mine} test files as unaffected, ran 0`,
+		)
 		expect((await repo.run('--changed', '--shard=2/2')).ran).toEqual([])
 		const third = await repo.run('--changed', '--shard=1/3')
 		expect(third.output).toContain('no dependency snapshot')
