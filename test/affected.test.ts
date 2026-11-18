@@ -23,6 +23,7 @@ import {
 	expect,
 	test,
 } from 'vitest'
+import { version as vitestVersion } from 'vitest/node'
 
 import { SNAPSHOT_FILE, type Snapshot } from '../src/affected.ts'
 import { cacheKey, runtimeId } from '../src/cache.ts'
@@ -204,8 +205,8 @@ describe('--changed against the tree snapshot', () => {
 	})
 
 	test('a full run writes the snapshot, then --changed runs nothing', async () => {
-		const first = await repo.run()
-		expect(first.exitCode, first.output).toBe(0)
+			const first = await repo.run()
+			expect(first.exitCode, first.output).toBe(0)
 		expect(first.ran).toEqual([...TESTS].sort())
 		expect(first.output).toContain(
 			`[blacksmith] filtered out 0 of ${TESTS.length} test files as unaffected, ran ${TESTS.length}`,
@@ -744,14 +745,17 @@ describe('snapshot is only written by runs that cover the shard', () => {
 
 describe('env files', () => {
 	// Vitest 5.1's own record leaves out an env file that is not there.
-	test.skipIf(recordsNatively(vitestVersion))('one created after the record reruns every test', async () => {
-		const repo = new Repo('env')
+	test.skipIf(recordsNatively(vitestVersion))(
+		'one created after the record reruns every test',
+		async () => {
+			const repo = new Repo('env')
 		const first = await repo.run()
 		expect(first.exitCode, first.output).toBe(0)
-		expect((await repo.run('--changed')).ran).toEqual([])
-		repo.write('.env.local', 'VITE_CREATED=1\n')
-		expect((await repo.run('--changed')).ran).toEqual(first.ran)
-	})
+			expect((await repo.run('--changed')).ran).toEqual([])
+			repo.write('.env.local', 'VITE_CREATED=1\n')
+			expect((await repo.run('--changed')).ran).toEqual(first.ran)
+		},
+	)
 })
 
 describe('vm pools', () => {

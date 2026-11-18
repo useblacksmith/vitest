@@ -363,6 +363,9 @@ function writeOwnRecord(): void {
 	if (!ownRecords || !state?.filepath || !root || !graph) return
 	const files = new Set<string>(state.dependencies)
 	const seen = new Set<EvaluatedModule>()
+	// A graph without the test file would leave a record without its
+	// imports, and a record is what lets a later run skip the file.
+	if (![...(graph.getModulesByFile(state.filepath) ?? [])].length) return
 	const queue = [state.filepath, ...(state.config?.setupFiles ?? [])].flatMap(
 		(file) => [...(graph.getModulesByFile(file) ?? [])],
 	)
