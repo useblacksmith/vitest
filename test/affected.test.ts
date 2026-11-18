@@ -29,7 +29,11 @@ import { SNAPSHOT_FILE, type Snapshot } from '../src/affected.ts'
 import { cacheKey, runtimeId } from '../src/cache.ts'
 import { anchorTree, blobsAt, diffTrees } from '../src/git.ts'
 import { supportsVersion } from '../src/index.ts'
-import { recordsNatively } from '../src/records.ts'
+import { OWN_RECORDS_FILE, recordsNatively } from '../src/records.ts'
+
+const recordsFile = recordsNatively(vitestVersion)
+	? 'dependencies.json'
+	: OWN_RECORDS_FILE
 import { shardFor } from '../src/sequencer.ts'
 import { packageRoot } from './harness.ts'
 
@@ -1550,7 +1554,7 @@ describe('the dependency record travels through the Actions cache', () => {
 		mkdirSync(cacheDir, { recursive: true })
 		// What an earlier `vitest run --project other` in the same job leaves behind.
 		writeFileSync(path.join(cacheDir, 'blacksmith.0123456789ab.json'), '{}')
-		writeFileSync(path.join(cacheDir, 'dependencies.json'), '{}')
+		writeFileSync(path.join(cacheDir, recordsFile), '{}')
 		const run = await repo.run('--changed')
 		expect(run.exitCode, run.output).toBe(0)
 		expect(run.output).toContain('restored dependency cache')
@@ -1853,7 +1857,7 @@ describe('hygiene: lockfiles, dependency globs and record growth', () => {
 		await repo.run()
 		const cacheDir = path.join(repo.cwd, 'node_modules', '.vite', 'vitest')
 		const [found] = readdirSync(cacheDir, { recursive: true, encoding: 'utf8' })
-			.filter((entry) => path.basename(entry) === 'dependencies.json')
+			.filter((entry) => path.basename(entry) === recordsFile)
 		if (!found) throw new Error('no dependencies.json recorded')
 		const file = path.join(cacheDir, found)
 		const records = JSON.parse(readFileSync(file, 'utf8')) as {

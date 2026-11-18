@@ -12,6 +12,7 @@ import {
 	envFiles,
 	type DependencyRecord,
 	type DependencyRecords,
+	recordsPath,
 } from './records.js'
 import {
 	cacheKey,
@@ -210,12 +211,12 @@ export function snapshotPath(vitest: Vitest, dir: string): string {
 	return path.join(dir, `${parts.join('.')}.json`)
 }
 
-/** `dependencies.json` (vitest's, or the plugin's own on a vitest that keeps none), or `null` before the first recorded run. */
+/** The dependency record (vitest's, or the plugin's own on a vitest that keeps none), or `null` before the first recorded run. */
 async function readRecords(
 	vitest: Vitest,
 	dir: string,
 ): Promise<DependencyRecords | null> {
-	const file = path.join(dir, 'dependencies.json')
+	const file = recordsPath(vitest, dir)
 	try {
 		return JSON.parse(await readFile(file, 'utf8')) as DependencyRecords
 	} catch {
@@ -322,7 +323,7 @@ async function anchoredPaths(
 }
 
 /**
- * Rewrites vitest's `dependencies.json` without the modules outside the
+ * Rewrites the dependency record without the modules outside the
  * repository (the anchor cannot cover them) and without tests that no longer
  * exist, renumbering what the remaining records point to. Vitest only ever
  * appends, so a record otherwise grows by every temp file a run touched.
@@ -372,7 +373,7 @@ async function pruneRecords(
 		if (project.globalSetup) renumber(project.globalSetup)
 		project.modules = modules
 	}
-	const file = path.join(dir, 'dependencies.json')
+	const file = recordsPath(vitest, dir)
 	const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
 	await writeFile(tmp, JSON.stringify(records))
 	await rename(tmp, file)
@@ -405,7 +406,7 @@ async function dropUnloadedRecords(
 		}
 	}
 	if (!dropped) return
-	const file = path.join(dir, 'dependencies.json')
+	const file = recordsPath(vitest, dir)
 	const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
 	await writeFile(tmp, JSON.stringify(records))
 	await rename(tmp, file)

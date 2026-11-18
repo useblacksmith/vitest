@@ -9,7 +9,7 @@ import type { TestModule, TestProject, Vitest } from 'vitest/node'
 /**
  * Vitest 5.1 records what each test file loaded and selects from that record.
  * Vitest 4.1 does neither, so on it the plugin keeps the record itself, in
- * the same `dependencies.json` and the same shape, and the rest of the plugin
+ * the same shape but a file of its own, and the rest of the plugin
  * (anchor, cache bundle, selection) reads one format on every version.
  */
 export const RECORDS_VERSION = 2
@@ -129,6 +129,17 @@ function watchedFiles(project: TestProject, files: string[]): string[] {
 	return watched
 }
 
+/** The plugin's own record on a Vitest that keeps none, where no Vitest reads it. */
+export const OWN_RECORDS_FILE = 'blacksmith-dependencies.json'
+
+/** The dependency record in `dir`: Vitest's `dependencies.json`, or the plugin's own file. */
+export function recordsPath(vitest: Vitest, dir: string): string {
+	return path.join(
+		dir,
+		recordsOwn(vitest.version) ? OWN_RECORDS_FILE : 'dependencies.json',
+	)
+}
+
 /** Installed packages change with the lockfile, which reruns everything. */
 function isRecordable(file: string): boolean {
 	return path.isAbsolute(file) && !file.includes('node_modules')
@@ -141,7 +152,7 @@ export class DependencyStore {
 	constructor(private readonly vitest: Vitest) {}
 
 	private get file(): string {
-		return path.join(this.vitest.vite.config.cacheDir, 'dependencies.json')
+		return recordsPath(this.vitest, this.vitest.vite.config.cacheDir)
 	}
 
 	/** What the test file `filepath` of `project` loaded this run; the same call Vitest 5.1's record takes. */
@@ -187,7 +198,7 @@ export class DependencyStore {
 	}
 
 	/**
-	 * Merges this run's records into `dependencies.json`. A `partial` run
+	 * Merges this run's records into the plugin's record. A `partial` run
 	 * skipped tests and with them their dynamic imports: it adds to a file's
 	 * record and never starts one, so a file without a record keeps running.
 	 */
