@@ -9,6 +9,7 @@ import { recordBrowserDependencies } from './browser.js'
 import {
 	cacheKey,
 	ENV_CACHE_URL,
+	cacheMode,
 	restoreBundle,
 	runtimeId,
 	saveBundle,
@@ -1219,6 +1220,12 @@ export async function restoreDependencyCache(vitest: Vitest): Promise<void> {
 		shard: vitest.config.shard ?? null,
 		head: process.env.GITHUB_SHA || (await headSha(repo)),
 	})
+	if (!cacheMode().readable) {
+		vitest.logger.log(
+			'[blacksmith] no dependency cache: the Actions cache is not readable for this job',
+		)
+		return
+	}
 	try {
 		const outcome = await restoreBundle(base, vitest.vite.config.cacheDir, key)
 		vitest.logger.log(
