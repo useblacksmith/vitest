@@ -1404,6 +1404,31 @@ describe('the dependency record travels through the Actions cache', () => {
 		expect(existsSync(path.join(cacheDir(consumer), other))).toBe(false)
 	})
 
+	test('a second save for the same commit and a read-only cache are reported as such, not as failures', async () => {
+		const repo = new Repo('cache-save-messages')
+		repo.env = { ACTIONS_RESULTS_URL: cache.url }
+		const first = await repo.run()
+		expect(first.output).toContain('saved dependency cache')
+		const again = await repo.run()
+		expect(again.exitCode, again.output).toBe(0)
+		expect(again.output).toMatch(
+			/dependency cache not saved: an earlier run already saved blacksmith-vitest-\S+ for this commit/,
+		)
+
+		const readOnly = new Repo('cache-read-only')
+		readOnly.env = {
+			ACTIONS_RESULTS_URL: cache.url,
+			ACTIONS_CACHE_MODE: 'read',
+		}
+		const saves = cache.entries.size
+		const run = await readOnly.run()
+		expect(run.exitCode, run.output).toBe(0)
+		expect(run.output).toContain(
+			'dependency cache not saved: the Actions cache is read-only for this job',
+		)
+		expect(cache.entries.size).toBe(saves)
+	})
+
 	test('shadow mode runs everything, reports what the selection would have run, and keeps the cache warm', async () => {
 		const producer = new Repo('shadow-producer')
 		producer.env = { ACTIONS_RESULTS_URL: cache.url }
