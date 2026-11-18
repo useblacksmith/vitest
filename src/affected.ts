@@ -971,6 +971,18 @@ export class SnapshotRecorder implements Reporter {
 		)
 	}
 
+	/** How many of the shard's test files the selection left out, logged once the run has finished. */
+	private async reportFiltered(): Promise<void> {
+		if (this.options.shadow) return
+		const owns = await shardOwner(this.vitest)
+		const filtered = [...this.activeProvider().deselected].filter(
+			(file) => owns(file) && !this.started.has(file),
+		).length
+		this.vitest.logger.log(
+			`[blacksmith] filtered out ${filtered} of ${this.started.size + filtered} test files as unaffected, ran ${this.started.size}`,
+		)
+	}
+
 	/** The provider vitest is using: the root config's, which may come from another copy of this module. */
 	private activeProvider(): { deselected: Set<string> } {
 		return configuredProvider(this.vitest) ?? this.provider
@@ -999,6 +1011,7 @@ export class SnapshotRecorder implements Reporter {
 		reason: TestRunEndReason,
 	): Promise<void> {
 		await this.reportShadow(modules)
+		await this.reportFiltered()
 		// A failed run still vouches for the files that passed; the failed ones
 		// are left out and rerun next time. An interrupted run left files unrun,
 		// an unhandled error fails the run outside any module (`reason` does not
