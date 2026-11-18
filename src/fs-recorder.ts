@@ -213,7 +213,7 @@ export function wrapFs(
 	for (const name of CONTENT_READS) each(name, reader(true))
 	each('open', writer(0, 'read', second))
 	each('writeFile', writer(0, 'replace', option(2)))
-	each('appendFile', writer(0, 'keep'))
+	each('appendFile', writer(0, 'keep', option(2)))
 	each('mkdir', writer(0, 'replace'))
 	each('copyFile', copyFile)
 	each('cp', tree)
