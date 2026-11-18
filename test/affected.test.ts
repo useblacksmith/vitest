@@ -918,6 +918,55 @@ test('bump', () => expect(readFileSync(file, 'utf8')).toBe(before))
 		expect((await repo.run('--changed')).ran.sort()).toEqual(['bump', 'generated'])
 	})
 
+	test('a file one test wrote is still a dependency of a later test in the same worker', async () => {
+		const repo = new Repo('outputs-shared-worker')
+		repo.write('.gitignore', IGNORE)
+		repo.write(
+			'src/a-writer.test.ts',
+			`import { writeFileSync } from 'node:fs'
+import { expect, test } from 'vitest'
+
+writeFileSync('src/generated/value.json', '{ "value": "generated" }\\n')
+test('writer', () => expect(1).toBe(1))
+`,
+		)
+		repo.commit('writer')
+		const first = await repo.run('--no-isolate', '--no-file-parallelism')
+		expect(first.exitCode, first.output).toBe(0)
+		repo.write('src/generated/value.json', '{ "value": "regenerated" }\n')
+		expect((await repo.run('--changed')).ran).toContain('generated')
+	})
+
+	test('a file the test appended to, or failed to create, stays a dependency', async () => {
+		const repo = new Repo('outputs-keep')
+		repo.write('src/fixtures/log.txt', 'first\n')
+		repo.write('src/fixtures/taken.txt', 'taken\n')
+		repo.write(
+			'src/keep.test.ts',
+			`import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
+import { expect, test } from 'vitest'
+
+appendFileSync('src/fixtures/log.txt', '')
+try {
+	writeFileSync('src/fixtures/taken.txt', 'mine', { flag: 'wx' })
+} catch {}
+
+test('keep', () => {
+	expect(readFileSync('src/fixtures/log.txt', 'utf8')).toContain('\\n')
+	expect(readFileSync('src/fixtures/taken.txt', 'utf8')).not.toBe('mine')
+})
+`,
+		)
+		repo.commit('keep')
+		expect((await repo.run()).exitCode).toBe(0)
+		repo.write('src/fixtures/log.txt', 'second\n')
+		expect((await repo.run('--changed')).ran).toEqual(['keep'])
+		repo.commit('log')
+		expect((await repo.run()).exitCode).toBe(0)
+		repo.write('src/fixtures/taken.txt', 'retaken\n')
+		expect((await repo.run('--changed')).ran).toEqual(['keep'])
+	})
+
 	test('a file a child process wrote and the test then read is not a dependency', async () => {
 		const repo = new Repo('outputs-child')
 		repo.write('.gitignore', IGNORE)

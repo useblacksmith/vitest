@@ -100,25 +100,38 @@ export class Outputs {
 		this.written.add(file)
 		return true
 	}
-
-	*[Symbol.iterator](): IterableIterator<string> {
-		yield* this.written
-	}
 }
 
 /** Reads that only ask whether or what a path is; one before a write leaves the path an output. */
 const PROBES = ['access', 'lstat', 'readlink', 'realpath', 'stat']
-const CONTENT_READS = ['copyFile', 'opendir', 'readdir', 'readFile', 'rename']
-const WRITES = ['appendFile', 'mkdir', 'writeFile']
-/** Writes whose target is the second argument. */
-const WRITES_TO = ['copyFile', 'link', 'rename', 'symlink']
+const CONTENT_READS = ['opendir', 'readdir', 'readFile']
 
-/** Whether `open(path, flags)` replaces the file's content rather than reading it. */
-function opensForWrite(fs: typeof FS, flags: unknown): boolean {
-	if (typeof flags === 'string') return /[wa]/.test(flags)
-	if (typeof flags !== 'number') return false
-	const { O_RDWR, O_TRUNC, O_WRONLY } = fs.constants
-	return (flags & O_TRUNC) !== 0 || (flags & (O_WRONLY | O_RDWR)) === O_WRONLY
+/**
+ * What a call does to the file it names: `replace` leaves nothing of what was
+ * there; `keep` (append, exclusive create, write in place) leaves a file
+ * already there in place, whole or in part.
+ */
+type Effect = 'read' | 'replace' | 'keep'
+
+/** The effect of opening a file with `flags`, `open`'s second argument or a `flag`/`flags` option. */
+function effectOf(fs: typeof FS, flags: unknown, fallback: Effect): Effect {
+	if (typeof flags === 'string') {
+		if (flags.includes('x') || flags.includes('a')) return 'keep'
+		if (flags.includes('w')) return 'replace'
+		return flags.includes('+') ? 'keep' : 'read'
+	}
+	if (typeof flags !== 'number') return fallback
+	const { O_APPEND, O_EXCL, O_RDWR, O_TRUNC, O_WRONLY } = fs.constants
+	if ((flags & (O_WRONLY | O_RDWR)) === 0) return 'read'
+	if ((flags & (O_EXCL | O_APPEND)) !== 0) return 'keep'
+	return (flags & O_TRUNC) !== 0 ? 'replace' : 'keep'
+}
+
+/** The `flag` (`writeFile`) or `flags` (`createWriteStream`) of an options argument. */
+function flagOption(options: unknown): unknown {
+	if (typeof options !== 'object' || options === null) return undefined
+	const { flag, flags } = options as { flag?: unknown; flags?: unknown }
+	return flag ?? flags
 }
 
 /**
@@ -136,29 +149,43 @@ export function wrapFs(
 		const file = toPath(args[0])
 		if (file !== null) read(file, content)
 	}
-	// `mkdir -p` and a copy onto a directory that is already there change nothing.
-	const write = (file: string) => {
+	const apply = (file: string, effect: Effect) => {
+		if (effect === 'read') return read(file, true)
+		let existing: FS.Stats | undefined
 		try {
-			if (statSync(file).isDirectory()) return
+			existing = statSync(file)
 		} catch {}
+		// `mkdir -p` and a copy onto a directory that is already there change nothing.
+		if (existing?.isDirectory()) return
+		// What was there stays, so the call depends on it.
+		if (existing && effect === 'keep') return read(file, true)
 		wrote(file)
 	}
-	const writer = (index: number) => (args: unknown[]) => {
-		const file = toPath(args[index])
-		if (file !== null) write(file)
-	}
-	const open = (args: unknown[]) => {
-		const file = toPath(args[0])
-		if (file === null) return
-		if (opensForWrite(fs, args[1])) write(file)
-		else read(file, true)
+	/** A call writing the path at `index`; `flags` picks the argument that can make it keep the file. */
+	const writer =
+		(index: number, fallback: Effect, flags?: (args: unknown[]) => unknown) =>
+		(args: unknown[]) => {
+			const file = toPath(args[index])
+			if (file === null) return
+			apply(file, flags ? effectOf(fs, flags(args), fallback) : fallback)
+		}
+	const copyFile = (args: unknown[]) => {
+		reader(true)(args)
+		const to = toPath(args[1])
+		if (to === null) return
+		const exclusive =
+			typeof args[2] === 'number' &&
+			(args[2] & fs.constants.COPYFILE_EXCL) !== 0
+		apply(to, exclusive ? 'keep' : 'replace')
 	}
 	const tree = (args: unknown[]) => {
 		const from = toPath(args[0])
 		const to = toPath(args[1])
 		if (from === null) return
+		const options = (args[2] ?? {}) as { force?: boolean }
+		const effect: Effect = options.force === false ? 'keep' : 'replace'
 		read(from, true)
-		if (to !== null) write(to)
+		if (to !== null) apply(to, effect)
 		let entries: string[]
 		try {
 			entries = readdirSync(from, { recursive: true, encoding: 'utf8' })
@@ -167,7 +194,7 @@ export function wrapFs(
 		}
 		for (const entry of entries) {
 			read(path.join(from, entry), true)
-			if (to !== null) write(path.join(to, entry))
+			if (to !== null) apply(path.join(to, entry), effect)
 		}
 	}
 	const target = fs as unknown as Wrappable
@@ -177,23 +204,37 @@ export function wrapFs(
 		wrap(target, `${name}Sync`, before)
 		wrap(promises, name, before)
 	}
-	const both =
-		(...before: Array<(args: unknown[]) => void>) =>
-		(args: unknown[]) => {
-			for (const call of before) call(args)
-		}
+	const second = (args: unknown[]) => args[1]
+	const option = (index: number) => (args: unknown[]) =>
+		typeof args[index] === 'string' ? undefined : flagOption(args[index])
 	for (const name of PROBES) each(name, reader(false))
-	for (const name of CONTENT_READS) {
-		each(
-			name,
-			WRITES_TO.includes(name) ? both(reader(true), writer(1)) : reader(true),
-		)
-	}
-	for (const name of WRITES) each(name, writer(0))
-	for (const name of WRITES_TO) each(name, writer(1))
-	each('open', open)
+	for (const name of CONTENT_READS) each(name, reader(true))
+	each('open', writer(0, 'read', second))
+	each('writeFile', writer(0, 'replace', option(2)))
+	each('appendFile', writer(0, 'keep'))
+	each('mkdir', writer(0, 'replace'))
+	each('copyFile', copyFile)
 	each('cp', tree)
+	each('rename', (args) => {
+		reader(true)(args)
+		writer(1, 'replace')(args)
+	})
+	// What the new name reads is the target's content; a link that is already
+	// there makes the call fail.
+	each('link', (args) => {
+		reader(true)(args)
+		writer(1, 'keep')(args)
+	})
+	each('symlink', (args) => {
+		const target = toPath(args[0])
+		const link = toPath(args[1])
+		// A relative target is relative to the link's directory.
+		if (target !== null && link !== null) {
+			read(path.resolve(path.dirname(link), target), true)
+		}
+		writer(1, 'keep')(args)
+	})
+	wrap(target, 'createWriteStream', writer(0, 'replace', option(1)))
 	wrap(target, 'existsSync', reader(false))
 	wrap(target, 'createReadStream', reader(true))
-	wrap(target, 'createWriteStream', writer(0))
 }

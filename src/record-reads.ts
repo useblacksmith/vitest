@@ -96,14 +96,17 @@ const OUTPUTS = Symbol.for('blacksmith.recordReads.outputs')
 
 // On the shared builtin, like the context: the wrapped `fs` keeps the first
 // evaluation's closures under the `vm` pools.
-/** What the test file owning the dependency set `set` wrote. */
-function outputsOf(set: Set<string>): Outputs {
-	const all = ((shared[OUTPUTS] as
-		| WeakMap<Set<string>, Outputs>
-		| undefined) ??= new WeakMap())
-	let outputs = all.get(set)
-	if (!outputs) all.set(set, (outputs = new Outputs()))
-	return outputs
+/** What the running test file wrote; a worker runs its files one after another on one dependency set. */
+function outputs(): Outputs {
+	const test = workerState()?.filepath
+	let current = shared[OUTPUTS] as
+		| { test: string | undefined; outputs: Outputs }
+		| undefined
+	if (!current || current.test !== test) {
+		current = { test, outputs: new Outputs() }
+		shared[OUTPUTS] = current
+	}
+	return current.outputs
 }
 
 function record(file: string, cwd = process.cwd(), content = true): void {
@@ -111,7 +114,7 @@ function record(file: string, cwd = process.cwd(), content = true): void {
 	if (!set) return
 	const absolute = path.resolve(cwd, file)
 	if (isIgnored(absolute)) return
-	if (outputsOf(set).reads(absolute, content)) set.add(absolute)
+	if (outputs().reads(absolute, content)) set.add(absolute)
 }
 
 /** `since`: see `Outputs.writes`. */
@@ -120,7 +123,7 @@ function wrote(file: string, cwd = process.cwd(), since?: number): void {
 	if (!set) return
 	const absolute = path.resolve(cwd, file)
 	if (isIgnored(absolute)) return
-	if (outputsOf(set).writes(absolute, since)) set.delete(absolute)
+	if (outputs().writes(absolute, since)) set.delete(absolute)
 }
 
 wrapFs(
@@ -223,12 +226,11 @@ function outstanding(): Set<Child> {
 }
 
 function startChild(file: string | null, cwd: string): Child {
-	const set = dependencies()
 	const child: Child = {
 		file,
 		cwd,
 		test: workerState()?.filepath,
-		startedAt: set ? outputsOf(set).now() : 0,
+		startedAt: outputs().now(),
 	}
 	if (file !== null) outstanding().add(child)
 	return child
@@ -326,10 +328,6 @@ afterAll(() => {
 		recordReported(child)
 		outstanding().delete(child)
 	}
-	// Vitest adds what the test imported on its own, a module the test
-	// generated included.
-	const set = dependencies()
-	if (set) for (const file of outputsOf(set)) set.delete(file)
 })
 
 type Wrappable = Record<string, unknown>
