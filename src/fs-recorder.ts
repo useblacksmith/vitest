@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type * as FS from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -11,6 +12,8 @@ export const CHILD_RECORD_ENV = 'BLACKSMITH_CHILD_RECORD'
 export const ENV_REPO = 'BLACKSMITH_REPO'
 /** Directory, made and removed by the main process, that holds every child record. */
 export const ENV_RECORD_ROOT = 'BLACKSMITH_RECORD_ROOT'
+/** Set when vitest keeps no dependency record and the workers write the plugin's. */
+export const ENV_OWN_RECORDS = 'BLACKSMITH_OWN_RECORDS'
 
 /** Starts a line of a child's record that names a path the child wrote, not one it read. */
 export const WRITE_PREFIX = 'write:'
@@ -239,4 +242,16 @@ export function wrapFs(
 	wrap(target, 'createWriteStream', writer(0, 'replace', option(1)))
 	wrap(target, 'existsSync', reader(false))
 	wrap(target, 'createReadStream', reader(true))
+}
+
+// Here, not with the store that reads it: a worker must not import `node:fs`
+// before `record-reads` wraps it, or the `vm` pools hand tests the unwrapped one.
+/** Where a worker leaves what the test file `test` of `project` loaded, under the run's record root. */
+export function workerRecordPath(
+	root: string,
+	project: string,
+	test: string,
+): string {
+	const name = createHash('sha1').update(`${project}\0${test}`).digest('hex')
+	return path.join(root, 'deps', `${name}.json`)
 }

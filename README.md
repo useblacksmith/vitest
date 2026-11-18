@@ -22,7 +22,7 @@ export default defineConfig({
 
 With the plugin, vitest only runs tests impacted by changes since the last successful run. `--shard=i/n` works as usual; the plugin assigns files to shards itself so each shard's cache stays stable.
 
-Requires Vitest 5.1 or newer.
+Requires Vitest 4.1.1 or later 4.x, or 5.1 or newer. From 5.1 the plugin selects from Vitest's own record of what each test file loaded; on 4.x, which keeps none, it records that itself.
 
 ### Vite+
 

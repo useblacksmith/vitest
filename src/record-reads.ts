@@ -9,11 +9,13 @@ import { afterAll } from 'vitest'
 import {
 	BRAND,
 	CHILD_RECORD_ENV,
+	ENV_OWN_RECORDS,
 	ENV_RECORD_ROOT,
 	Outputs,
 	WRITE_PREFIX,
 	copyProperties,
 	isIgnored,
+	workerRecordPath,
 	wrapFs,
 } from './fs-recorder.ts'
 
@@ -36,10 +38,20 @@ const workerThreads =
 
 const CONTEXT = Symbol.for('blacksmith.recordReads.context')
 
+interface EvaluatedModule {
+	file?: string
+	imports?: Iterable<string>
+}
+
 interface WorkerState {
 	dependencies?: Set<string>
 	/** The test file being run. */
 	filepath?: string
+	config?: { name?: string; setupFiles?: string[] }
+	evaluatedModules?: {
+		getModulesByFile(file: string): Iterable<EvaluatedModule> | undefined
+		getModuleById(id: string): EvaluatedModule | undefined
+	}
 }
 
 interface Context {
@@ -62,6 +74,7 @@ type Originals = Pick<
 	| 'readFileSync'
 	| 'rmSync'
 	| 'statSync'
+	| 'writeFileSync'
 >
 
 // Unwrapped, so this module's own file handling records nothing; kept on the
@@ -74,6 +87,7 @@ const {
 	readFileSync: read,
 	rmSync: rm,
 	statSync: stat,
+	writeFileSync: write,
 } = ((shared[ORIGINALS] as Originals | undefined) ??= {
 	existsSync: fs.existsSync,
 	mkdirSync: fs.mkdirSync,
@@ -82,6 +96,7 @@ const {
 	readFileSync: fs.readFileSync,
 	rmSync: fs.rmSync,
 	statSync: fs.statSync,
+	writeFileSync: fs.writeFileSync,
 })
 
 function workerState(): WorkerState | undefined {
@@ -328,7 +343,43 @@ afterAll(() => {
 		recordReported(child)
 		outstanding().delete(child)
 	}
+	writeOwnRecord()
 })
+
+// A vitest older than 5.1 keeps no dependency set per test file: this setup
+// file starts one for the reads recorded above, and once the file's hooks are
+// done leaves it, with every module the file and its setup files evaluated,
+// where the plugin's reporter picks it up.
+const ownRecords = process.env[ENV_OWN_RECORDS] === '1'
+if (ownRecords) {
+	const state = workerState()
+	if (state) state.dependencies = new Set()
+}
+
+function writeOwnRecord(): void {
+	const state = workerState()
+	const root = process.env[ENV_RECORD_ROOT]
+	const graph = state?.evaluatedModules
+	if (!ownRecords || !state?.filepath || !root || !graph) return
+	const files = new Set<string>(state.dependencies)
+	const seen = new Set<EvaluatedModule>()
+	const queue = [state.filepath, ...(state.config?.setupFiles ?? [])].flatMap(
+		(file) => [...(graph.getModulesByFile(file) ?? [])],
+	)
+	while (queue.length > 0) {
+		const node = queue.pop()
+		if (!node || seen.has(node)) continue
+		seen.add(node)
+		if (node.file) files.add(node.file)
+		for (const id of node.imports ?? []) {
+			const imported = graph.getModuleById(id)
+			if (imported) queue.push(imported)
+		}
+	}
+	const file = workerRecordPath(root, state.config?.name ?? '', state.filepath)
+	mkdir(path.dirname(file), { recursive: true })
+	write(file, JSON.stringify([...files]))
+}
 
 type Wrappable = Record<string, unknown>
 

@@ -6,6 +6,13 @@ import path from 'node:path'
 import picomatch from 'picomatch'
 
 import { recordBrowserDependencies } from './browser.js'
+import { ENV_RECORD_ROOT } from './fs-recorder.js'
+import {
+	dependencyStore,
+	envFiles,
+	type DependencyRecord,
+	type DependencyRecords,
+} from './records.js'
 import {
 	cacheKey,
 	ENV_CACHE_URL,
@@ -19,8 +26,6 @@ import type {
 	TestModule,
 	TestRunEndReason,
 	TestSpecification,
-	VCSProvider,
-	VCSProviderOptions,
 	Vitest,
 } from 'vitest/node'
 
@@ -39,7 +44,7 @@ import { shardOwner } from './sequencer.js'
 
 export const SNAPSHOT_FILE = 'blacksmith.json'
 export const UNSUPPORTED_VITEST =
-	'[blacksmith] @useblacksmith/vitest selects changed tests on Vitest 5.1.0 or newer; upgrade vitest, or set `runAllTests: true` and drop --changed'
+	'[blacksmith] @useblacksmith/vitest selects changed tests on Vitest 4.1.1 or newer 4.x, or 5.1.0 or newer; upgrade vitest, or set `runAllTests: true` and drop --changed'
 // Bumped whenever the snapshot's shape changes or the records an anchor
 // vouches for gain a kind of dependency, so an older snapshot is not trusted.
 const SNAPSHOT_VERSION = 7
@@ -205,26 +210,7 @@ export function snapshotPath(vitest: Vitest, dir: string): string {
 	return path.join(dir, `${parts.join('.')}.json`)
 }
 
-interface DependencyRecord {
-	deps: number[]
-	at?: number
-}
-
-interface ProjectRecords {
-	modules: string[]
-	files: Record<string, DependencyRecord>
-	/** What the project's config loaded, when vitest recorded it. */
-	config?: DependencyRecord
-	/** What `globalSetup` loaded, when the project has one. */
-	globalSetup?: DependencyRecord
-}
-
-interface DependencyRecords {
-	version: number
-	projects: Record<string, ProjectRecords>
-}
-
-/** Vitest's `dependencies.json`, or `null` before the first recorded run. */
+/** `dependencies.json` (vitest's, or the plugin's own on a vitest that keeps none), or `null` before the first recorded run. */
 async function readRecords(
 	vitest: Vitest,
 	dir: string,
@@ -515,7 +501,18 @@ export function configuredProvider(
 	return isTreeSnapshotProvider(configured) ? configured : null
 }
 
-export class TreeSnapshotProvider implements VCSProvider {
+/** Vitest's `VCSProviderOptions`; only 5.1 and newer pass a `resolver`, and 4.1 does not export the type. */
+interface VCSProviderOptions {
+	root: string
+	changedSince?: string | boolean
+	resolver?: {
+		getDependencies(): Promise<
+			Array<{ file: string; recordedAt?: number | undefined }>
+		>
+	}
+}
+
+export class TreeSnapshotProvider {
 	readonly [PROVIDER_BRAND] = true
 	vitest!: Vitest
 	/**
@@ -553,9 +550,17 @@ export class TreeSnapshotProvider implements VCSProvider {
 
 	async findChangedFiles(options: VCSProviderOptions): Promise<string[]> {
 		this.deselected = new Set()
-		if (!options.resolver) throw new Error(UNSUPPORTED_VITEST)
-		const dependencies = await options.resolver.getDependencies()
 		const cacheDir = this.vitest.vite.config.cacheDir
+		// Vitest 5.1 hands over its record and selects from the changed files
+		// itself; on an older one both are the plugin's.
+		const own = dependencyStore(this.vitest) !== null
+		if (!own && !options.resolver) throw new Error(UNSUPPORTED_VITEST)
+		const specifications = own
+			? await this.vitest.globTestSpecifications()
+			: []
+		const dependencies = options.resolver
+			? await options.resolver.getDependencies()
+			: await ownDependencies(this.vitest, cacheDir, specifications)
 		const selected = await this.select(
 			options,
 			dependencies,
@@ -578,6 +583,21 @@ export class TreeSnapshotProvider implements VCSProvider {
 			if (changed.has(test)) continue
 			if ([...deps].some((dep) => changed.has(dep))) continue
 			this.deselected.add(test)
+		}
+		if (own) {
+			const affected = await affectedTests(
+				this.vitest,
+				selected,
+				await readRecords(this.vitest, cacheDir),
+				specifications,
+			)
+			// Vitest 4.1 runs a test file named among the changed files.
+			if (affected.wouldRun !== 'all') return [...affected.wouldRun]
+			this.vitest.logger.log(
+				`[blacksmith] ${affected.reason}, running every test`,
+			)
+			this.vitest.config.changed = false
+			return specifications.map((specification) => specification.moduleId)
 		}
 		return selected
 	}
@@ -722,17 +742,113 @@ export class TreeSnapshotProvider implements VCSProvider {
 	}
 }
 
+/** Test file → when it was recorded, as Vitest 5.1's resolver lists them; no time for a file without a record. */
+async function ownDependencies(
+	vitest: Vitest,
+	dir: string,
+	specifications: ReadonlyArray<TestSpecification>,
+): Promise<Array<{ file: string; recordedAt?: number | undefined }>> {
+	const records = await readRecords(vitest, dir)
+	const { root } = vitest.config
+	const recordedAt = new Map<string, number | undefined>()
+	for (const specification of specifications) {
+		const record =
+			records?.projects[specification.project.name]?.files[
+				path.relative(root, specification.moduleId).split(path.sep).join('/')
+			]
+		const file = specification.moduleId
+		const previous = recordedAt.get(file)
+		if (!record) recordedAt.set(file, undefined)
+		else if (!recordedAt.has(file)) recordedAt.set(file, record.at ?? 0)
+		else if (previous !== undefined) {
+			recordedAt.set(file, Math.min(previous, record.at ?? 0))
+		}
+	}
+	return Array.from(recordedAt, ([file, at]) => ({ file, recordedAt: at }))
+}
+
+/**
+ * The test files Vitest 5.1 runs for the changed files `selected`: shadow
+ * mode's prediction there, and the selection itself on a vitest that has none.
+ */
+async function affectedTests(
+	vitest: Vitest,
+	selected: readonly string[],
+	records: DependencyRecords | null,
+	specifications: ReadonlyArray<TestSpecification>,
+): Promise<
+	{ wouldRun: Set<string>; reason: null } | { wouldRun: 'all'; reason: string }
+> {
+	const changedFiles = new Set(selected)
+	const dependsOnChange = (files: readonly string[] | undefined) =>
+		files?.some((file) => changedFiles.has(file)) ?? false
+	// What vitest does with the changed files: `forceRerunTriggers` and the
+	// root config rerun everything; a project's config, env files, missing
+	// record or globalSetup rerun the project; otherwise a test reruns when
+	// it has no record or one of its recorded dependencies changed.
+	const triggers = vitest.config.forceRerunTriggers
+	if (
+		selected.some((file) => picomatch.isMatch(file, triggers, { dot: true }))
+	) {
+		return { wouldRun: 'all', reason: 'a changed file matches forceRerunTriggers' }
+	}
+	if (dependsOnChange(vitest.vite.config.configFileDependencies)) {
+		return { wouldRun: 'all', reason: 'a dependency of the config changed' }
+	}
+	const wouldRun = new Set<string>()
+	for (const project of vitest.projects) {
+		const specs = specifications.filter(
+			(specification) => specification.project === project,
+		)
+		if (specs.length === 0) continue
+		const record = records?.projects[project.name]
+		// Record paths are relative to the root config's root, whatever the project's.
+		const projectRoot = vitest.config.root
+		const modules = (indexes: number[] | undefined) =>
+			indexes?.map((index) =>
+				path.resolve(projectRoot, record?.modules[index] ?? ''),
+			)
+		if (
+			!record ||
+			dependsOnChange(project.vite.config.configFileDependencies) ||
+			dependsOnChange(envFiles(project)) ||
+			(project.config.globalSetup.length > 0 &&
+				(!record.globalSetup ||
+					dependsOnChange(modules(record.globalSetup.deps))))
+		) {
+			for (const spec of specs) wouldRun.add(spec.moduleId)
+			continue
+		}
+		for (const spec of specs) {
+			const test =
+				record.files[
+					path.relative(projectRoot, spec.moduleId).split(path.sep).join('/')
+				]
+			if (
+				!test ||
+				changedFiles.has(spec.moduleId) ||
+				dependsOnChange(modules(test.deps))
+			) {
+				wouldRun.add(spec.moduleId)
+			}
+		}
+	}
+	return { wouldRun, reason: null }
+}
+
 function containsOnly(module: TestModule): boolean {
 	return (module as { task?: { containsOnly?: boolean } }).task?.containsOnly === true
 }
 
 function isPartialSpecification(specification: TestSpecification): boolean {
+	// Not every filter exists on every supported vitest.
+	const filters = specification as unknown as Record<string, unknown>
 	return (
-		specification.testLines !== undefined ||
-		specification.testIds !== undefined ||
-		specification.testNames !== undefined ||
-		specification.testNamePattern !== undefined ||
-		specification.testTagsFilter !== undefined
+		filters.testLines !== undefined ||
+		filters.testIds !== undefined ||
+		filters.testNames !== undefined ||
+		filters.testNamePattern !== undefined ||
+		filters.testTagsFilter !== undefined
 	)
 }
 
@@ -829,71 +945,16 @@ export class ShadowAnalysis {
 			reason,
 		})
 		if (selected === null) return all(lastMessage)
-		const changedFiles = new Set(selected)
-		const dependsOnChange = (files: readonly string[] | undefined) =>
-			files?.some((file) => changedFiles.has(file)) ?? false
-		// What vitest does with the changed files: `forceRerunTriggers` and the
-		// root config rerun everything; a project's config, env files, missing
-		// record or globalSetup rerun the project; otherwise a test reruns when
-		// it has no record or one of its recorded dependencies changed.
-		const triggers = vitest.config.forceRerunTriggers
-		if (
-			selected.some((file) => picomatch.isMatch(file, triggers, { dot: true }))
-		) {
-			return all('a changed file matches forceRerunTriggers')
-		}
-		if (dependsOnChange(vitest.vite.config.configFileDependencies)) {
-			return all('a dependency of the config changed')
-		}
-		const wouldRun = new Set<string>()
-		for (const project of vitest.projects) {
-			const specs = specifications.filter(
-				(specification) => specification.project === project,
-			)
-			if (specs.length === 0) continue
-			const record = records?.projects[project.name]
-			// Record paths are relative to the root config's root, whatever the project's.
-			const projectRoot = vitest.config.root
-			const modules = (indexes: number[] | undefined) =>
-				indexes?.map((index) =>
-					path.resolve(projectRoot, record?.modules[index] ?? ''),
-				)
-			if (
-				!record ||
-				dependsOnChange(project.vite.config.configFileDependencies) ||
-				dependsOnChange(envFiles(project)) ||
-				(project.config.globalSetup.length > 0 &&
-					(!record.globalSetup ||
-						dependsOnChange(modules(record.globalSetup.deps))))
-			) {
-				for (const spec of specs) wouldRun.add(spec.moduleId)
-				continue
-			}
-			for (const spec of specs) {
-				const test =
-					record.files[
-						path.relative(projectRoot, spec.moduleId).split(path.sep).join('/')
-					]
-				if (
-					!test ||
-					changedFiles.has(spec.moduleId) ||
-					dependsOnChange(modules(test.deps))
-				) {
-					wouldRun.add(spec.moduleId)
-				}
-			}
-		}
+		const affected = await affectedTests(
+			vitest,
+			selected,
+			records,
+			specifications,
+		)
+		if (affected.wouldRun === 'all') return all(affected.reason)
+		const { wouldRun } = affected
 		return { wouldRun, changed, head, key: outcome.key, reason: null }
 	}
-}
-
-/** The env files vitest reloads a project for, as `getEnvFiles` lists them. */
-function envFiles(project: Vitest['projects'][number]): string[] {
-	const { envDir, mode } = project.vite.config
-	if (typeof envDir !== 'string') return []
-	return ['.env', '.env.local', `.env.${mode}`, `.env.${mode}.local`].map(
-		(file) => path.resolve(envDir, file),
-	)
 }
 
 /**
@@ -918,6 +979,8 @@ export class SnapshotRecorder implements Reporter {
 	private partial = false
 	/** Tests a run vouches for once its coverage thresholds have passed. */
 	private pending: string[] | null = null
+	/** Worker records being read into the plugin's own store. */
+	private collecting: Promise<void>[] = []
 
 	constructor(
 		private readonly provider: TreeSnapshotProvider,
@@ -989,8 +1052,13 @@ export class SnapshotRecorder implements Reporter {
 			(this.vitest.config.tagsFilter?.length ?? 0) > 0
 	}
 
-	onTestModuleEnd(module: TestModule): void {
+	async onTestModuleEnd(module: TestModule): Promise<void> {
 		recordBrowserDependencies(this.vitest, module)
+		const store = dependencyStore(this.vitest)
+		const root = process.env[ENV_RECORD_ROOT]
+		if (store && root && !module.project.isBrowserEnabled()) {
+			this.collecting.push(store.collect(module, root))
+		}
 	}
 
 	async onTestRunEnd(
@@ -999,6 +1067,13 @@ export class SnapshotRecorder implements Reporter {
 		reason: TestRunEndReason,
 	): Promise<void> {
 		await this.reportShadow(modules)
+		const store = dependencyStore(this.vitest)
+		if (store) {
+			await Promise.all(this.collecting.splice(0))
+			const namePattern = this.vitest.getGlobalTestNamePattern() !== undefined
+			const cut = this.partial || namePattern || reason === 'interrupted'
+			await store.update(modules, (module) => cut || containsOnly(module))
+		}
 		// A failed run still vouches for the files that passed; the failed ones
 		// are left out and rerun next time. An interrupted run left files unrun,
 		// an unhandled error fails the run outside any module (`reason` does not

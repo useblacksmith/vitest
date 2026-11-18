@@ -1,3 +1,5 @@
+import { dependencyStore } from './records.js'
+
 import type { TestModule, TestProject, Vitest } from 'vitest/node'
 
 /** The internal record the node worker's `onTestModuleDependencies` RPC feeds. */
@@ -32,7 +34,7 @@ export function recordBrowserDependencies(
 ): void {
 	const project = module.project
 	if (!project.isBrowserEnabled()) return
-	const cache = dependenciesCache(vitest)
+	const cache = dependencyStore(vitest) ?? dependenciesCache(vitest)
 	if (!cache) {
 		if (!warned.has(vitest)) {
 			warned.add(vitest)
@@ -42,7 +44,14 @@ export function recordBrowserDependencies(
 		}
 		return
 	}
-	const graph = project.vite.environments.client?.moduleGraph
+	// Vitest 4.1 serves the browser from a Vite server of its own.
+	const servers = [
+		project.vite,
+		(project.browser as { vite?: typeof project.vite } | undefined)?.vite,
+	]
+	const graph = servers
+		.map((server) => server?.environments.client?.moduleGraph)
+		.find((candidate) => candidate?.getModulesByFile(module.moduleId)?.size)
 	if (!graph) return
 	const roots = [...(graph.getModulesByFile(module.moduleId) ?? [])]
 	// A test the browser never fetched through this graph has no record to

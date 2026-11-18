@@ -25,7 +25,7 @@
 		"release": "scripts/release.sh"
 	},
 	"peerDependencies": {
-		"vitest": ">=5.1.0"
+		"vitest": "^4.1.1 || >=5.1.0"
 	},
 	"devDependencies": {
 		"@types/node": "^26.6.6",

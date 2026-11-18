@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url'
 
 import type { Plugin } from 'vitest/config'
 import type { Vitest } from 'vitest/node'
-import { ENV_RECORD_ROOT, ENV_REPO } from './fs-recorder.js'
+import { ENV_OWN_RECORDS, ENV_RECORD_ROOT, ENV_REPO } from './fs-recorder.js'
+import { dependencyStore, recordsNatively, recordsOwn } from './records.js'
 import { repoRoot } from './git.js'
 
 import {
@@ -60,10 +61,14 @@ export interface BlacksmithOptions {
 	dependencies?: Record<string, string | string[]>
 }
 
-/** Vitest 5.1.0 is the first to hand a VCS provider the dependency records. */
+/**
+ * Vitest 4.1.1 is the first with a pluggable VCS provider, and from 5.1.0
+ * vitest records each test file's dependencies itself. On 4.1.1 and later 4.x
+ * the plugin records them; 5.0 has neither that record nor the worker state
+ * the plugin's own is read from.
+ */
 export function supportsVersion(version: string): boolean {
-	const [major = 0, minor = 0] = version.split('.').map(Number)
-	return major > 5 || (major === 5 && minor >= 1)
+	return recordsOwn(version) || recordsNatively(version)
 }
 
 /** Whether this Vitest wired up the pieces `--changed` selection relies on. */
@@ -74,8 +79,9 @@ function supportsChanged(vitest: Vitest): boolean {
 	return (
 		supportsVersion(vitest.version) &&
 		typeof vcs?.findChangedFiles === 'function' &&
-		experimental?.recordDependencies === true &&
-		isTreeSnapshotProvider(experimental.vcsProvider)
+		(!recordsNatively(vitest.version) ||
+			experimental?.recordDependencies === true) &&
+		isTreeSnapshotProvider(experimental?.vcsProvider)
 	)
 }
 
@@ -132,6 +138,9 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 			// cannot cover it, and vitest's record would otherwise keep every
 			// temp file a run touched.
 			process.env[ENV_REPO] ??= await repoRoot(vitest.config.root)
+			// Tells the workers of a vitest without a dependency record to leave
+			// theirs for the plugin's.
+			if (dependencyStore(vitest)) process.env[ENV_OWN_RECORDS] = '1'
 			if (!process.env[ENV_RECORD_ROOT]) {
 				const root = mkdtempSync(path.join(tmpdir(), 'blacksmith-child-'))
 				process.env[ENV_RECORD_ROOT] = root
@@ -188,7 +197,7 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 					vitest.config.passWithNoTests = true
 				} else {
 					vitest.logger.warn(
-						`[blacksmith] vitest ${vitest.version} cannot select changed tests, running every test; @useblacksmith/vitest needs vitest 5.1.0 or newer`,
+						`[blacksmith] vitest ${vitest.version} cannot select changed tests, running every test; @useblacksmith/vitest needs vitest 4.1.1 or newer 4.x, or 5.1.0 or newer`,
 					)
 				}
 			}
@@ -196,6 +205,24 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 			// than asking the provider again with a `changedSince` it ignores.
 			if (!options.shadow && vitest.config.changed && supportsChanged(vitest)) {
 				vitest.config.coverage.changed = false
+			}
+			// Vitest 4.1 runs a test when the changed files name it or anything in
+			// its static import graph, transforming every test's graph to find
+			// out. The provider already names exactly the tests to run.
+			if (
+				!options.shadow &&
+				vitest.config.changed &&
+				supportsChanged(vitest) &&
+				dependencyStore(vitest)
+			) {
+				const specifications = (
+					vitest as unknown as {
+						specifications?: { getTestDependencies?: unknown }
+					}
+				).specifications
+				if (typeof specifications?.getTestDependencies === 'function') {
+					specifications.getTestDependencies = async () => new Set<string>()
+				}
 			}
 			// Per project, since a project's own `setupFiles` replace the root's;
 			// first, so reads by those setup files are recorded too. A browser

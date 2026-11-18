@@ -1315,7 +1315,7 @@ describe('the dependency record travels through the Actions cache', () => {
 		const triggered = await repo.run()
 		expect(triggered.exitCode, triggered.output).toBe(0)
 		expect(triggered.output).toMatch(
-			/shadow: would have run (\d+) of \1 test files \(everything: a changed file matches forceRerunTriggers/,
+			/shadow: would have run (\d+) of \1 test files \(everything: (a changed file matches forceRerunTriggers|a dependency of the config changed)/,
 		)
 		repo.commit('config')
 
@@ -1651,9 +1651,12 @@ describe('identity: the workflow file and job', () => {
 })
 
 describe('vitest versions', () => {
-	test('only 5.1.0 and newer select changed tests', () => {
+	test('4.1.1 and 5.1.0 and newer select changed tests', () => {
+		expect(supportsVersion('4.1.0')).toBe(false)
+		expect(supportsVersion('4.1.1')).toBe(true)
+		expect(supportsVersion('4.2.0')).toBe(true)
 		expect(supportsVersion('5.0.5')).toBe(false)
-		expect(supportsVersion('4.9.0')).toBe(false)
+		expect(supportsVersion('4.1.11')).toBe(true)
 		expect(supportsVersion('5.1.0')).toBe(true)
 		expect(supportsVersion('5.2.0-beta.1')).toBe(true)
 		expect(supportsVersion('6.0.0')).toBe(true)
