@@ -1231,6 +1231,45 @@ describe('projects that do not extend the root config', () => {
 	})
 })
 
+describe('what a test file loads after its own hooks', () => {
+	for (const flags of [
+		[],
+		['--pool=threads'],
+		['--pool=vmThreads'],
+		['--pool=vmForks'],
+		['--no-isolate'],
+		['--pool=threads', '--no-isolate'],
+	]) {
+		test(`a file read only in teardown is a dependency (${flags.join(' ') || 'default pool'})`, async () => {
+			const repo = new Repo(`teardown-${flags.join('').replaceAll(/\W/g, '') || 'default'}`)
+			repo.write('src/fixtures/teardown/cleanup.txt', 'one\n')
+			repo.write('src/fixtures/teardown/late.txt', 'one\n')
+			repo.write(
+				'src/teardown.test.ts',
+				[
+					"import { readFileSync } from 'node:fs'",
+					"import { afterAll, beforeAll, test } from 'vitest'",
+					'',
+					"const fixture = (name: string) => new URL(`./fixtures/teardown/${name}`, import.meta.url)",
+					"beforeAll(() => () => void readFileSync(fixture('cleanup.txt')))",
+					"afterAll(() => void readFileSync(fixture('late.txt')))",
+					"test('runs', () => {})",
+					'',
+				].join('\n'),
+			)
+			repo.commit('teardown')
+			const first = await repo.run(...flags)
+			expect(first.exitCode, first.output).toBe(0)
+			expect((await repo.run('--changed', ...flags)).ran).toEqual([])
+			repo.write('src/fixtures/teardown/cleanup.txt', 'two\n')
+			expect((await repo.run('--changed', ...flags)).ran).toEqual(['teardown'])
+			expect((await repo.run('--changed', ...flags)).ran).toEqual([])
+			repo.write('src/fixtures/teardown/late.txt', 'two\n')
+			expect((await repo.run('--changed', ...flags)).ran).toEqual(['teardown'])
+		})
+	}
+})
+
 describe('globalSetup of a root config that has no tests of its own', () => {
 	// Fails on vitest 5.1.0, main included: its own selection reruns nothing.
 	test.skipIf(recordsNatively(vitestVersion))(

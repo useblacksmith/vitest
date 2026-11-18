@@ -1003,7 +1003,7 @@ export class SnapshotRecorder implements Reporter {
 	/** Tests a run vouches for once its coverage thresholds have passed. */
 	private pending: string[] | null = null
 	/** Worker records being read into the plugin's own store. */
-	private collecting: Promise<void>[] = []
+	private ended: TestModule[] = []
 
 	constructor(
 		private readonly provider: TreeSnapshotProvider,
@@ -1103,7 +1103,7 @@ export class SnapshotRecorder implements Reporter {
 		const store = dependencyStore(this.vitest)
 		const root = process.env[ENV_RECORD_ROOT]
 		if (store && root && !module.project.isBrowserEnabled()) {
-			this.collecting.push(store.collect(module, root))
+			this.ended.push(module)
 		}
 	}
 
@@ -1115,7 +1115,14 @@ export class SnapshotRecorder implements Reporter {
 		await this.reportShadow(modules)
 		const store = dependencyStore(this.vitest)
 		if (store) {
-			await Promise.all(this.collecting.splice(0))
+			// At the end of the run, not of the module: a worker finishes a
+			// file's record when it starts its next file or exits.
+			const root = process.env[ENV_RECORD_ROOT]
+			if (root) {
+				await Promise.all(
+					this.ended.splice(0).map((module) => store.collect(module, root)),
+				)
+			}
 			const namePattern = this.vitest.getGlobalTestNamePattern() !== undefined
 			const cut = this.partial || namePattern || reason === 'interrupted'
 			await store.update(modules, (module) => cut || containsOnly(module))

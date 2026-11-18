@@ -351,24 +351,33 @@ afterAll(() => {
 // done leaves it, with every module the file and its setup files evaluated,
 // where the plugin's reporter picks it up.
 const ownRecords = process.env[ENV_OWN_RECORDS] === '1'
-if (ownRecords) {
-	const state = workerState()
-	if (state) state.dependencies = new Set()
+
+interface PendingRecord {
+	file: string
+	test: string
+	setupFiles: readonly string[]
+	graph: NonNullable<WorkerState['evaluatedModules']>
+	files: Set<string>
+	late: Set<string>
 }
 
-function writeOwnRecord(): void {
-	const state = workerState()
-	const root = process.env[ENV_RECORD_ROOT]
-	const graph = state?.evaluatedModules
-	if (!ownRecords || !state?.filepath || !root || !graph) return
-	const files = new Set<string>(state.dependencies)
+// On the process, not the module: a worker that reuses itself evaluates this
+// file again for its next test file, and a vm pool gives each its own global.
+const PENDING = Symbol.for('blacksmith.vitest.pendingRecord')
+const pendingHolder = process as unknown as {
+	[PENDING]?: { record?: PendingRecord; exits?: true }
+}
+const pending = (pendingHolder[PENDING] ??= {})
+
+function recordedFiles(
+	graph: PendingRecord['graph'],
+	roots: readonly string[],
+	files: Set<string>,
+): Set<string> {
 	const seen = new Set<EvaluatedModule>()
-	// A graph without the test file would leave a record without its
-	// imports, and a record is what lets a later run skip the file.
-	if (![...(graph.getModulesByFile(state.filepath) ?? [])].length) return
-	const queue = [state.filepath, ...(state.config?.setupFiles ?? [])].flatMap(
-		(file) => [...(graph.getModulesByFile(file) ?? [])],
-	)
+	const queue = roots.flatMap((file) => [
+		...(graph.getModulesByFile(file) ?? []),
+	])
 	while (queue.length > 0) {
 		const node = queue.pop()
 		if (!node || seen.has(node)) continue
@@ -379,12 +388,61 @@ function writeOwnRecord(): void {
 			if (imported) queue.push(imported)
 		}
 	}
+	return files
+}
+
+/**
+ * Writes the last test file's record again with what it loaded and read
+ * after this file's `afterAll`: teardown that runs later (a `beforeAll`
+ * cleanup, a fixture, a later `afterAll`) and imports still in flight.
+ */
+function finishPendingRecord(): void {
+	const record = pending.record
+	if (!record) return
+	delete pending.record
+	for (const file of record.late) record.files.add(file)
+	recordedFiles(record.graph, [record.test, ...record.setupFiles], record.files)
+	try {
+		write(record.file, JSON.stringify([...record.files]))
+	} catch {}
+}
+
+if (ownRecords) {
+	finishPendingRecord()
+	const state = workerState()
+	if (state) state.dependencies = new Set()
+	// Vitest runs these when it tears the worker down, after every hook.
+	;(state as { onCleanup?: (cb: () => void) => void } | undefined)?.onCleanup?.(
+		finishPendingRecord,
+	)
+	if (!pending.exits) {
+		pending.exits = true
+		process.on('exit', finishPendingRecord)
+	}
+}
+
+function writeOwnRecord(): void {
+	const state = workerState()
+	const root = process.env[ENV_RECORD_ROOT]
+	const graph = state?.evaluatedModules
+	if (!ownRecords || !state?.filepath || !root || !graph) return
+	// A graph without the test file would leave a record without its
+	// imports, and a record is what lets a later run skip the file.
+	if (![...(graph.getModulesByFile(state.filepath) ?? [])].length) return
+	const setupFiles = state.config?.setupFiles ?? []
+	const files = recordedFiles(
+		graph,
+		[state.filepath, ...setupFiles],
+		new Set<string>(state.dependencies),
+	)
 	const file = workerRecordPath(root, state.config?.name ?? '', state.filepath)
 	mkdir(path.dirname(file), { recursive: true })
 	write(file, JSON.stringify([...files]))
-	// A worker that runs its next file without evaluating this one again
-	// must not charge that file with these reads.
-	state.dependencies = new Set()
+	// What is read from here on is still this file's until the worker starts
+	// its next one, and never that one's.
+	const late = new Set<string>()
+	state.dependencies = late
+	pending.record = { file, test: state.filepath, setupFiles, graph, files, late }
 }
 
 type Wrappable = Record<string, unknown>
