@@ -1229,27 +1229,30 @@ describe('projects that do not extend the root config', () => {
 
 describe('globalSetup of a root config that has no tests of its own', () => {
 	// Fails on vitest 5.1.0, main included: its own selection reruns nothing.
-	test.skipIf(recordsNatively(vitestVersion))('reruns every project when a file it loads changes', async () => {
-		const repo = new Repo('root-setup', 'fixture-projects')
-		repo.write(
-			'vitest.config.ts',
-			readFileSync(path.join(repo.cwd, 'vitest.config.ts'), 'utf8')
-				.replace('runAllTests: true', '')
-				.replace('projects: [', "globalSetup: ['./global.ts'],\n\t\tprojects: [")
-				.replaceAll("include: ['src", "globalSetup: [], include: ['src"),
-		)
-		repo.write('global-lib.ts', 'export const value = 1\n')
-		repo.write(
-			'global.ts',
-			"import { value } from './global-lib.ts'\n\nexport default () => void value\n",
-		)
-		repo.commit('root globalSetup')
-		const first = await repo.run()
-		expect(first.exitCode, first.output).toBe(0)
-		expect((await repo.run()).ran).toEqual([])
-		repo.write('global-lib.ts', 'export const value = 2\n')
-		expect((await repo.run()).ran).toEqual(['shared', 'shared'])
-	})
+	test.skipIf(recordsNatively(vitestVersion))(
+		'reruns every project when a file it loads changes',
+		async () => {
+			const repo = new Repo('root-setup', 'fixture-projects')
+			repo.write(
+				'vitest.config.ts',
+				readFileSync(path.join(repo.cwd, 'vitest.config.ts'), 'utf8')
+					.replace('runAllTests: true', '')
+					.replace('projects: [', "globalSetup: ['./global.ts'],\n\t\tprojects: [")
+					.replaceAll('extends: true,', ''),
+			)
+			repo.write('global-lib.ts', 'export const value = 1\n')
+			repo.write(
+				'global.ts',
+				"import { value } from './global-lib.ts'\n\nexport default () => void value\n",
+			)
+			repo.commit('root globalSetup')
+			const first = await repo.run()
+			expect(first.exitCode, first.output).toBe(0)
+			expect((await repo.run()).ran).toEqual([])
+			repo.write('global-lib.ts', 'export const value = 2\n')
+			expect((await repo.run()).ran).toEqual(['shared', 'shared'])
+		},
+	)
 })
 
 /** In-memory stand-in for the Actions cache service's twirp API plus its blob URLs. */

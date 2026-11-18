@@ -70,8 +70,12 @@ interface ModuleGraph {
 	getModuleById(id: string): ModuleNode | undefined
 }
 
-/** The files `globalSetup` loaded, read from the graph of the runner vitest imported it with. */
-function globalSetupFiles(project: TestProject): string[] {
+/**
+ * The files `globalSetup` loaded, read from the graph of the runner vitest
+ * imported it with; null when this run did not load it (a run without tests
+ * to run does not), so that what an earlier run recorded is kept.
+ */
+function globalSetupFiles(project: TestProject): string[] | null {
 	const setups = [project.config.globalSetup ?? []].flat()
 	if (setups.length === 0) return []
 	const files = new Set<string>(setups)
@@ -82,6 +86,7 @@ function globalSetupFiles(project: TestProject): string[] {
 	const queue: ModuleNode[] = setups.flatMap((file) => [
 		...(graph.getModulesByFile(file) ?? []),
 	])
+	if (queue.length === 0) return null
 	const seen = new Set<ModuleNode>()
 	while (queue.length > 0) {
 		const node = queue.pop()
@@ -202,7 +207,7 @@ export class DependencyStore {
 			]
 			entry.config = { at, deps: intern(entry, config) }
 			const globalSetup = globalSetupFiles(project)
-			if (globalSetup.length > 0) {
+			if (globalSetup && globalSetup.length > 0) {
 				entry.globalSetup = { at, deps: intern(entry, globalSetup) }
 			}
 		}
