@@ -12,6 +12,9 @@ export const ENV_REPO = 'BLACKSMITH_REPO'
 /** Directory, made and removed by the main process, that holds every child record. */
 export const ENV_RECORD_ROOT = 'BLACKSMITH_RECORD_ROOT'
 
+/** Starts a line of a child's record that names a path the child wrote, not one it read. */
+export const WRITE_PREFIX = 'write:'
+
 export function toPath(target: unknown): string | null {
 	if (typeof target === 'string') return target
 	if (Buffer.isBuffer(target)) return target.toString()
@@ -63,47 +66,177 @@ export function copyProperties(wrapped: object, original: object): void {
 	}
 }
 
-const READS = [
-	'access',
-	'copyFile',
-	'lstat',
-	'open',
-	'opendir',
-	'readdir',
-	'readFile',
-	'readlink',
-	'realpath',
-	'stat',
-]
+/**
+ * Tells what a run produced from what it depended on: a path written before
+ * its content was read is an output, the same on every run whatever was on
+ * disk before, so it is not a dependency.
+ *
+ * e.g. `cpSync(src, 'public/gen')` then `readFileSync('public/gen/a.png')` → `src/a.png` is a dependency, `public/gen/a.png` is not
+ */
+export class Outputs {
+	private contentRead = new Map<string, number>()
+	private written = new Set<string>()
+	private clock = 0
 
-/** Wraps every read entry point of `fs` so `record` sees the path argument; a copied tree is recorded file by file. */
-export function wrapReads(fs: typeof FS, record: (file: string) => void): void {
-	const first = (args: unknown[]) => {
+	/** Grows with every first content read; a child keeps the value it started at. */
+	now(): number {
+		return this.clock
+	}
+
+	/** False when `file` is an output, which is not to be recorded. */
+	reads(file: string, content: boolean): boolean {
+		if (this.written.has(file)) return false
+		if (content && !this.contentRead.has(file)) {
+			this.contentRead.set(file, ++this.clock)
+		}
+		return true
+	}
+
+	/** True when the write makes `file` an output: its content was not read first, reads after `since` (a child's start, its writes being reported late) aside. */
+	writes(file: string, since = Infinity): boolean {
+		if (this.written.has(file)) return true
+		const at = this.contentRead.get(file)
+		if (at !== undefined && at <= since) return false
+		this.written.add(file)
+		return true
+	}
+}
+
+/** Reads that only ask whether or what a path is; one before a write leaves the path an output. */
+const PROBES = ['access', 'lstat', 'readlink', 'realpath', 'stat']
+const CONTENT_READS = ['opendir', 'readdir', 'readFile']
+
+/**
+ * What a call does to the file it names: `replace` leaves nothing of what was
+ * there; `keep` (append, exclusive create, write in place) leaves a file
+ * already there in place, whole or in part.
+ */
+type Effect = 'read' | 'replace' | 'keep'
+
+/** The effect of opening a file with `flags`, `open`'s second argument or a `flag`/`flags` option. */
+function effectOf(fs: typeof FS, flags: unknown, fallback: Effect): Effect {
+	if (typeof flags === 'string') {
+		if (flags.includes('x') || flags.includes('a')) return 'keep'
+		if (flags.includes('w')) return 'replace'
+		// `r+` creates nothing: it needs the file that is there.
+		return 'read'
+	}
+	if (typeof flags !== 'number') return fallback
+	const { O_APPEND, O_CREAT, O_EXCL, O_RDWR, O_TRUNC, O_WRONLY } = fs.constants
+	if ((flags & (O_WRONLY | O_RDWR)) === 0) return 'read'
+	if ((flags & (O_EXCL | O_APPEND)) !== 0) return 'keep'
+	if ((flags & O_TRUNC) !== 0) return 'replace'
+	return (flags & O_CREAT) !== 0 ? 'keep' : 'read'
+}
+
+/** The `flag` (`writeFile`) or `flags` (`createWriteStream`) of an options argument. */
+function flagOption(options: unknown): unknown {
+	if (typeof options !== 'object' || options === null) return undefined
+	const { flag, flags } = options as { flag?: unknown; flags?: unknown }
+	return flag ?? flags
+}
+
+/**
+ * Wraps every entry point of `fs` that takes a path: `read` sees each path
+ * read (`content` false for a probe such as `stat`), `wrote` each path
+ * written; a copied tree is reported file by file on both sides.
+ */
+export function wrapFs(
+	fs: typeof FS,
+	read: (file: string, content: boolean) => void,
+	wrote: (file: string) => void,
+): void {
+	const { readdirSync, statSync } = fs
+	const reader = (content: boolean) => (args: unknown[]) => {
 		const file = toPath(args[0])
-		if (file !== null) record(file)
+		if (file !== null) read(file, content)
+	}
+	const apply = (file: string, effect: Effect) => {
+		if (effect === 'read') return read(file, true)
+		let existing: FS.Stats | undefined
+		try {
+			existing = statSync(file)
+		} catch {}
+		// `mkdir -p` and a copy onto a directory that is already there change nothing.
+		if (existing?.isDirectory()) return
+		// What was there stays, so the call depends on it.
+		if (existing && effect === 'keep') return read(file, true)
+		wrote(file)
+	}
+	/** A call writing the path at `index`; `flags` picks the argument that can make it keep the file. */
+	const writer =
+		(index: number, fallback: Effect, flags?: (args: unknown[]) => unknown) =>
+		(args: unknown[]) => {
+			const file = toPath(args[index])
+			if (file === null) return
+			apply(file, flags ? effectOf(fs, flags(args), fallback) : fallback)
+		}
+	const copyFile = (args: unknown[]) => {
+		reader(true)(args)
+		const to = toPath(args[1])
+		if (to === null) return
+		const exclusive =
+			typeof args[2] === 'number' &&
+			(args[2] & fs.constants.COPYFILE_EXCL) !== 0
+		apply(to, exclusive ? 'keep' : 'replace')
 	}
 	const tree = (args: unknown[]) => {
-		first(args)
-		const file = toPath(args[0])
-		if (file === null) return
+		const from = toPath(args[0])
+		const to = toPath(args[1])
+		if (from === null) return
+		const options = (args[2] ?? {}) as { force?: boolean }
+		const effect: Effect = options.force === false ? 'keep' : 'replace'
+		read(from, true)
+		if (to !== null) apply(to, effect)
 		let entries: string[]
 		try {
-			entries = fs.readdirSync(file, { recursive: true, encoding: 'utf8' })
+			entries = readdirSync(from, { recursive: true, encoding: 'utf8' })
 		} catch {
 			return
 		}
-		for (const entry of entries) record(path.join(file, entry))
+		for (const entry of entries) {
+			read(path.join(from, entry), true)
+			if (to !== null) apply(path.join(to, entry), effect)
+		}
 	}
 	const target = fs as unknown as Wrappable
 	const promises = fs.promises as unknown as Wrappable
-	for (const name of READS) {
-		wrap(target, name, first)
-		wrap(target, `${name}Sync`, first)
-		wrap(promises, name, first)
+	const each = (name: string, before: (args: unknown[]) => void) => {
+		wrap(target, name, before)
+		wrap(target, `${name}Sync`, before)
+		wrap(promises, name, before)
 	}
-	wrap(target, 'existsSync', first)
-	wrap(target, 'createReadStream', first)
-	wrap(target, 'cp', tree)
-	wrap(promises, 'cp', tree)
-	wrap(target, 'cpSync', tree)
+	const second = (args: unknown[]) => args[1]
+	const option = (index: number) => (args: unknown[]) =>
+		typeof args[index] === 'string' ? undefined : flagOption(args[index])
+	for (const name of PROBES) each(name, reader(false))
+	for (const name of CONTENT_READS) each(name, reader(true))
+	each('open', writer(0, 'read', second))
+	each('writeFile', writer(0, 'replace', option(2)))
+	each('appendFile', writer(0, 'keep', option(2)))
+	each('mkdir', writer(0, 'replace'))
+	each('copyFile', copyFile)
+	each('cp', tree)
+	each('rename', (args) => {
+		reader(true)(args)
+		writer(1, 'replace')(args)
+	})
+	// What the new name reads is the target's content; a link that is already
+	// there makes the call fail.
+	each('link', (args) => {
+		reader(true)(args)
+		writer(1, 'keep')(args)
+	})
+	each('symlink', (args) => {
+		const target = toPath(args[0])
+		const link = toPath(args[1])
+		// A relative target is relative to the link's directory.
+		if (target !== null && link !== null) {
+			read(path.resolve(path.dirname(link), target), true)
+		}
+		writer(1, 'keep')(args)
+	})
+	wrap(target, 'createWriteStream', writer(0, 'replace', option(1)))
+	wrap(target, 'existsSync', reader(false))
+	wrap(target, 'createReadStream', reader(true))
 }

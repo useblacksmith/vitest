@@ -852,6 +852,158 @@ describe('git-ignored inputs', () => {
 	})
 })
 
+describe('files a test writes', () => {
+	const IGNORE = 'node_modules/\nsrc/generated/\nsrc/mirrored/\n'
+
+	test('a tree the test copied and then read back is not a dependency; its source is', async () => {
+		const repo = new Repo('outputs-copy')
+		repo.write('.gitignore', IGNORE)
+		repo.write('src/assets/a.txt', 'a\n')
+		repo.write('src/assets/deep/b.txt', 'b\n')
+		repo.write(
+			'src/mirror.test.ts',
+			`import { cpSync, readdirSync, readFileSync } from 'node:fs'
+import { expect, test } from 'vitest'
+
+cpSync('src/assets', 'src/mirrored', { recursive: true })
+const read = readdirSync('src/mirrored', { recursive: true, withFileTypes: true })
+	.filter((entry) => entry.isFile())
+	.map((entry) => readFileSync(\`\${entry.parentPath}/\${entry.name}\`, 'utf8'))
+
+test('mirror', () => expect(read.sort()).toEqual(['a\\n', 'b\\n']))
+`,
+		)
+		repo.commit('mirror')
+		const first = await repo.run()
+		expect(first.exitCode, first.output).toBe(0)
+		const tree = Object.keys(repo.snapshot()?.tree ?? {})
+		expect(tree.filter((file) => file.startsWith('src/mirrored'))).toEqual([])
+		expect(tree).toContain('src/assets/deep/b.txt')
+		// A fresh checkout has no src/mirrored.
+		rmSync(path.join(repo.cwd, 'src/mirrored'), { recursive: true })
+		const fresh = await repo.run('--changed')
+		expect(fresh.output).toContain('[blacksmith] 0 files changed')
+		expect(fresh.ran).toEqual([])
+		repo.write('src/assets/deep/b.txt', 'changed\n')
+		expect((await repo.run('--changed')).ran).toEqual(['mirror'])
+	})
+
+	test('a file read before the test overwrote it stays a dependency', async () => {
+		const repo = new Repo('outputs-read-first')
+		repo.write('.gitignore', IGNORE)
+		repo.write(
+			'src/bump.test.ts',
+			`import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { expect, test } from 'vitest'
+
+const file = 'src/generated/value.json'
+const before = readFileSync(file, 'utf8')
+writeFileSync(file, before)
+// Asked about, not read, before it was written: an output.
+if (!existsSync('src/mirrored.txt')) writeFileSync('src/mirrored.txt', 'x')
+statSync('src/mirrored.txt')
+
+test('bump', () => expect(readFileSync(file, 'utf8')).toBe(before))
+`,
+		)
+		repo.write('.gitignore', `${IGNORE}src/mirrored.txt\n`)
+		repo.commit('bump')
+		expect((await repo.run()).exitCode).toBe(0)
+		const tree = repo.snapshot()?.tree ?? {}
+		expect(tree['src/generated/value.json']).toMatch(/^100644 /)
+		expect(tree['src/mirrored.txt']).toBeUndefined()
+		rmSync(path.join(repo.cwd, 'src/mirrored.txt'))
+		expect((await repo.run('--changed')).ran).toEqual([])
+		repo.write('src/generated/value.json', '{ "value": "generated" }\n\n')
+		expect((await repo.run('--changed')).ran.sort()).toEqual(['bump', 'generated'])
+	})
+
+	test('a file one test wrote is still a dependency of a later test in the same worker', async () => {
+		const repo = new Repo('outputs-shared-worker')
+		repo.write('.gitignore', IGNORE)
+		repo.write(
+			'src/a-writer.test.ts',
+			`import { writeFileSync } from 'node:fs'
+import { expect, test } from 'vitest'
+
+writeFileSync('src/generated/value.json', '{ "value": "generated" }\\n')
+test('writer', () => expect(1).toBe(1))
+`,
+		)
+		repo.commit('writer')
+		const first = await repo.run('--no-isolate', '--no-file-parallelism')
+		expect(first.exitCode, first.output).toBe(0)
+		repo.write('src/generated/value.json', '{ "value": "regenerated" }\n')
+		expect((await repo.run('--changed')).ran).toContain('generated')
+	})
+
+	test('a file the test appended to, or failed to create, stays a dependency', async () => {
+		const repo = new Repo('outputs-keep')
+		repo.write('src/fixtures/log.txt', 'first\n')
+		repo.write('src/fixtures/taken.txt', 'taken\n')
+		repo.write(
+			'src/keep.test.ts',
+			`import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
+import { expect, test } from 'vitest'
+
+appendFileSync('src/fixtures/log.txt', '')
+try {
+	writeFileSync('src/fixtures/taken.txt', 'mine', { flag: 'wx' })
+} catch {}
+
+test('keep', () => {
+	expect(readFileSync('src/fixtures/log.txt', 'utf8')).toContain('\\n')
+	expect(readFileSync('src/fixtures/taken.txt', 'utf8')).not.toBe('mine')
+})
+`,
+		)
+		repo.commit('keep')
+		expect((await repo.run()).exitCode).toBe(0)
+		repo.write('src/fixtures/log.txt', 'second\n')
+		expect((await repo.run('--changed')).ran).toEqual(['keep'])
+		repo.commit('log')
+		expect((await repo.run()).exitCode).toBe(0)
+		repo.write('src/fixtures/taken.txt', 'retaken\n')
+		expect((await repo.run('--changed')).ran).toEqual(['keep'])
+	})
+
+	test('a file a child process wrote and the test then read is not a dependency', async () => {
+		const repo = new Repo('outputs-child')
+		repo.write('.gitignore', IGNORE)
+		repo.write('src/assets/a.txt', 'a\n')
+		repo.write(
+			'src/scripts/build.mjs',
+			`import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+
+mkdirSync('src/mirrored', { recursive: true })
+writeFileSync('src/mirrored/a.txt', readFileSync('src/assets/a.txt', 'utf8'))
+`,
+		)
+		repo.write(
+			'src/build.test.ts',
+			`import { spawnSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
+import { expect, test } from 'vitest'
+
+test('build', () => {
+	expect(spawnSync(process.execPath, ['src/scripts/build.mjs']).status).toBe(0)
+	expect(readFileSync('src/mirrored/a.txt', 'utf8')).toBe('a\\n')
+})
+`,
+		)
+		repo.commit('build')
+		const first = await repo.run()
+		expect(first.exitCode, first.output).toBe(0)
+		const tree = Object.keys(repo.snapshot()?.tree ?? {})
+		expect(tree).not.toContain('src/mirrored/a.txt')
+		expect(tree).toContain('src/assets/a.txt')
+		rmSync(path.join(repo.cwd, 'src/mirrored'), { recursive: true })
+		expect((await repo.run('--changed')).ran).toEqual([])
+		repo.write('src/assets/a.txt', 'changed\n')
+		expect((await repo.run('--changed')).ran).toEqual(['build'])
+	})
+})
+
 describe('what a snapshot may vouch for', () => {
 	test('a deselected file vitest reran anyway and that failed is not vouched for', async () => {
 		const repo = new Repo('forced')

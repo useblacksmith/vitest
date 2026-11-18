@@ -10,9 +10,11 @@ import {
 	BRAND,
 	CHILD_RECORD_ENV,
 	ENV_RECORD_ROOT,
+	Outputs,
+	WRITE_PREFIX,
 	copyProperties,
 	isIgnored,
-	wrapReads,
+	wrapFs,
 } from './fs-recorder.ts'
 
 /**
@@ -20,7 +22,7 @@ import {
  * test imports; this records the files it reads through `node:fs` and the
  * node processes and worker threads it starts (their modules and reads, via
  * `record-child`), adding each to the dependency set vitest keeps per test
- * file.
+ * file. A file the test wrote before reading it is its output and stays out.
  *
  * The functions on the builtin are replaced, so every specifier that reaches
  * them (`fs`, `node:fs`, `fs/promises`, `require`) is covered.
@@ -90,15 +92,45 @@ function dependencies(): Set<string> | undefined {
 	return workerState()?.dependencies
 }
 
-function record(file: string, cwd = process.cwd()): void {
+const OUTPUTS = Symbol.for('blacksmith.recordReads.outputs')
+
+// On the shared builtin, like the context: the wrapped `fs` keeps the first
+// evaluation's closures under the `vm` pools.
+/** What the running test file wrote; a worker runs its files one after another on one dependency set. */
+function outputs(): Outputs {
+	const test = workerState()?.filepath
+	let current = shared[OUTPUTS] as
+		| { test: string | undefined; outputs: Outputs }
+		| undefined
+	if (!current || current.test !== test) {
+		current = { test, outputs: new Outputs() }
+		shared[OUTPUTS] = current
+	}
+	return current.outputs
+}
+
+function record(file: string, cwd = process.cwd(), content = true): void {
 	const set = dependencies()
 	if (!set) return
 	const absolute = path.resolve(cwd, file)
 	if (isIgnored(absolute)) return
-	set.add(absolute)
+	if (outputs().reads(absolute, content)) set.add(absolute)
 }
 
-wrapReads(fs, (file) => record(file))
+/** `since`: see `Outputs.writes`. */
+function wrote(file: string, cwd = process.cwd(), since?: number): void {
+	const set = dependencies()
+	if (!set) return
+	const absolute = path.resolve(cwd, file)
+	if (isIgnored(absolute)) return
+	if (outputs().writes(absolute, since)) set.delete(absolute)
+}
+
+wrapFs(
+	fs,
+	(file, content) => record(file, undefined, content),
+	(file) => wrote(file),
+)
 
 /** Beside this module; `.ts` when the plugin runs from source (its own test fixtures). */
 const recordChild = fileURLToPath(
@@ -179,6 +211,8 @@ interface Child {
 	cwd: string
 	/** The test file that started it; what it reports counts only while that file runs. */
 	test: string | undefined
+	/** `Outputs.now()` at its start: what the test read after that does not make a file the child wrote a dependency. */
+	startedAt: number
 }
 
 const OUTSTANDING = Symbol.for('blacksmith.recordReads.outstanding')
@@ -192,7 +226,12 @@ function outstanding(): Set<Child> {
 }
 
 function startChild(file: string | null, cwd: string): Child {
-	const child: Child = { file, cwd, test: workerState()?.filepath }
+	const child: Child = {
+		file,
+		cwd,
+		test: workerState()?.filepath,
+		startedAt: outputs().now(),
+	}
 	if (file !== null) outstanding().add(child)
 	return child
 }
@@ -259,8 +298,14 @@ function recordReported(child: Child): void {
 		} catch {
 			continue
 		}
-		for (const line of reported.split('\n'))
-			if (line !== '') record(line, child.cwd)
+		for (const line of reported.split('\n')) {
+			if (line === '') continue
+			if (line.startsWith(WRITE_PREFIX)) {
+				wrote(line.slice(WRITE_PREFIX.length), child.cwd, child.startedAt)
+			} else {
+				record(line, child.cwd)
+			}
+		}
 	}
 }
 
