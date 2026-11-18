@@ -101,6 +101,34 @@ function globalSetupFiles(project: TestProject): string[] | null {
 	return [...files].filter(isRecordable)
 }
 
+/**
+ * Files Vite's graph links to `files` that their transformed code does not
+ * import: what plugins watch for them. Vitest 5.1's record adds the same.
+ */
+function watchedFiles(project: TestProject, files: string[]): string[] {
+	const watched: string[] = []
+	for (const file of files) {
+		for (const environment of Object.values(project.vite.environments)) {
+			const nodes = [...(environment.moduleGraph.getModulesByFile(file) ?? [])]
+			const transformed = nodes.filter((node) => node.transformResult)
+			if (transformed.length === 0) continue
+			for (const node of transformed) {
+				const imports = new Set([
+					...(node.transformResult?.deps ?? []),
+					...(node.transformResult?.dynamicDeps ?? []),
+				])
+				for (const imported of node.importedModules) {
+					if (imported.file && !imports.has(imported.url)) {
+						watched.push(imported.file)
+					}
+				}
+			}
+			break
+		}
+	}
+	return watched
+}
+
 /** Installed packages change with the lockfile, which reruns everything. */
 function isRecordable(file: string): boolean {
 	return path.isAbsolute(file) && !file.includes('node_modules')
@@ -122,7 +150,9 @@ export class DependencyStore {
 		if (!files) this.recorded.set(project.name, (files = new Map()))
 		files.set(
 			filepath,
-			dependencies.filter(isRecordable),
+			[...dependencies, ...watchedFiles(project, dependencies)].filter(
+				isRecordable,
+			),
 		)
 	}
 
