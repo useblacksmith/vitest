@@ -84,9 +84,35 @@ async function twirp<T>(
 		body: JSON.stringify(body),
 		signal: AbortSignal.timeout(TIMEOUT_MS),
 	})
-	if (!response.ok) throw new Error(`${method} ${response.status}`)
+	if (!response.ok) throw new TwirpError(method, response.status)
 	return (await response.json()) as T
 }
+
+export class TwirpError extends Error {
+	constructor(
+		method: string,
+		readonly status: number,
+	) {
+		super(`${method} ${status}`)
+	}
+}
+
+/**
+ * The job's Actions cache mode as the runner exports it: `read` and `none`
+ * refuse a save, `write-only` and `none` refuse a restore. Unset on runners
+ * that do not export it.
+ */
+export function cacheMode(): { readable: boolean; writable: boolean } {
+	const mode = (process.env.GITHUB_ACTIONS_CACHE_MODE ?? '').trim().toLowerCase()
+	return {
+		readable: mode !== 'none' && mode !== 'write-only',
+		writable: mode !== 'none' && mode !== 'read',
+	}
+}
+
+const ALREADY_SAVED = (key: string) =>
+	`an earlier run already saved ${key} for this commit`
+const READ_ONLY = 'the Actions cache is read-only for this job'
 
 /**
  * Requests carry both casings: a twirp JSON server accepts proto field names
@@ -155,6 +181,7 @@ export async function saveBundle(
 	cacheDir: string,
 	{ key }: CacheKey,
 ): Promise<SaveOutcome> {
+	if (!cacheMode().writable) return { saved: false, reason: READ_ONLY }
 	const files: Record<string, string> = {}
 	for (const name of await readdir(cacheDir)) {
 		if (RECORD_FILE.test(name))
@@ -163,17 +190,22 @@ export async function saveBundle(
 	const body = gzipSync(
 		JSON.stringify({ version: BUNDLE_VERSION, files } satisfies Bundle),
 	)
-	const reserve = await twirp<Record<string, unknown>>(
-		base,
-		'CreateCacheEntry',
-		{
+	let reserve: Record<string, unknown>
+	try {
+		reserve = await twirp<Record<string, unknown>>(base, 'CreateCacheEntry', {
 			key,
 			version: BUNDLE_VERSION,
-		},
-	)
+		})
+	} catch (error) {
+		if (error instanceof TwirpError && error.status === 409)
+			return { saved: false, reason: ALREADY_SAVED(key) }
+		if (error instanceof TwirpError && error.status === 403)
+			return { saved: false, reason: READ_ONLY }
+		throw error
+	}
 	const url = field(reserve, 'signed_upload_url', 'signedUploadUrl')
 	if (!reserve.ok || typeof url !== 'string' || url === '') {
-		return { saved: false, reason: `${key} already exists or was refused` }
+		return { saved: false, reason: ALREADY_SAVED(key) }
 	}
 	const put = await fetch(url, {
 		method: 'PUT',
