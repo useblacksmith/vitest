@@ -60,7 +60,6 @@ Each run ends with a line saying how much it skipped: `[blacksmith] filtered out
 | option | default | effect |
 |---|---|---|
 | `runAllTests` | `false` | Run every test instead of the affected selection. |
-| `shadow` | `false` | Run every test, but log what the affected selection would have run and which failing test files it would have skipped, i.e. failures the selection would have missed. Use it to evaluate the plugin on a repo before relying on the selection. |
 | `dependencies` | `{}` | Dependencies the tracking cannot see, as globs of test files mapped to the glob(s) of the files they depend on, relative to the config root (`../shared/**` reaches outside a package): `{ 'tests/**/*.spec.ts': 'fixtures/**' }`. A change to a matching file reruns the mapped tests, git-ignored files (generated code, build output) included; a glob that matches no file in the repository warns. |
 
 ## Caveats

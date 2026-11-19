@@ -42,15 +42,6 @@ export interface BlacksmithOptions {
 	 */
 	runAllTests?: boolean
 	/**
-	 * Run every test and only *report* what the affected selection would have
-	 * run: vitest records dependencies but gets no `--changed` and no VCS
-	 * provider, the shard's cached record is fetched into a temporary directory
-	 * (vitest's `cacheDir` is left alone) and, when the run ends, the plugin
-	 * logs how many of the files that ran it would have selected and which
-	 * failing test files it would have skipped. A green run still saves the record.
-	 */
-	shadow?: boolean
-	/**
 	 * Dependencies the tracking cannot see (files a test reads through a child
 	 * process, in `globalSetup`, or outside node): globs of test files mapped
 	 * to the glob(s) of the files they depend on, both relative to the config
@@ -59,6 +50,16 @@ export interface BlacksmithOptions {
 	 */
 	dependencies?: Record<string, string | string[]>
 }
+
+/**
+ * Run every test and only *report* what the affected selection would have
+ * run: vitest records dependencies but gets no `--changed` and no VCS
+ * provider, the shard's cached record is fetched into a temporary directory
+ * (vitest's `cacheDir` is left alone) and, when the run ends, the plugin
+ * logs how many of the files that ran it would have selected and which
+ * failing test files it would have skipped. A green run still saves the record.
+ */
+type ShadowOption = { shadow?: boolean }
 
 /** Vitest 5.1.0 is the first to hand a VCS provider the dependency records. */
 export function supportsVersion(version: string): boolean {
@@ -90,6 +91,7 @@ function supportsChanged(vitest: Vitest): boolean {
 const PACKAGE = '@useblacksmith/vitest'
 
 export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
+	const shadowMode = (options as ShadowOption).shadow === true
 	const provider = new TreeSnapshotProvider()
 	let changedApplied = false
 	let restored: Promise<void> | undefined
@@ -109,7 +111,7 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 					.test?.server?.deps?.inline === true
 			return {
 				test: {
-					experimental: options.shadow
+					experimental: shadowMode
 						? { recordDependencies: true }
 						: { recordDependencies: true, vcsProvider: provider },
 					...(theirs ? {} : { sequence: { sequencer: HashShardSequencer } }),
@@ -149,7 +151,7 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 					vitest.config.sequence.sequencer,
 				)
 			}
-			if (options.shadow) {
+			if (shadowMode) {
 				if (vitest.config.changed) {
 					vitest.logger.warn(
 						'[blacksmith] shadow mode runs every test; ignoring --changed',
@@ -163,7 +165,7 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 			}
 			// With `--changed`, vitest measures coverage for the changed files
 			// alone, so thresholds would pass on a run that covers nothing.
-			const covered = !options.shadow && vitest.config.coverage.enabled
+			const covered = !shadowMode && vitest.config.coverage.enabled
 			if (covered && !changedApplied) {
 				changedApplied = true
 				if (!options.runAllTests) {
@@ -176,7 +178,7 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 			}
 			if (
 				!covered &&
-				!options.shadow &&
+				!shadowMode &&
 				!options.runAllTests &&
 				!vitest.config.changed &&
 				!changedApplied
@@ -194,7 +196,7 @@ export default function blacksmith(options: BlacksmithOptions = {}): Plugin {
 			}
 			// Coverage follows the selection (vitest's `config.related`) rather
 			// than asking the provider again with a `changedSince` it ignores.
-			if (!options.shadow && vitest.config.changed && supportsChanged(vitest)) {
+			if (!shadowMode && vitest.config.changed && supportsChanged(vitest)) {
 				vitest.config.coverage.changed = false
 			}
 			// Per project, since a project's own `setupFiles` replace the root's;

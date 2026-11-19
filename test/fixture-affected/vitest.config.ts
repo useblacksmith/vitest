@@ -11,7 +11,8 @@ export default defineConfig({
 		blacksmith({
 			// The default (affected selection) is what BLACKSMITH_CHANGED=1 exercises.
 			...(process.env.BLACKSMITH_CHANGED === '1' ? {} : { runAllTests: true }),
-			shadow: process.env.BLACKSMITH_SHADOW === '1',
+			// Not in the option type; spread in, as a config written before it left would still pass it.
+			...{ shadow: process.env.BLACKSMITH_SHADOW === '1' },
 			// mapped.test.ts reads nothing; only this rule ties it to mapped/.
 			dependencies: { 'src/mapped.test.ts': 'mapped/**' },
 		}),
