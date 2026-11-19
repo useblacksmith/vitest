@@ -41,14 +41,7 @@ export interface BlacksmithOptions {
 	 * Vitest never skips tests on a stale record.
 	 */
 	runAllTests?: boolean
-	/**
-	 * Run every test and only *report* what the affected selection would have
-	 * run: vitest records dependencies but gets no `--changed` and no VCS
-	 * provider, the shard's cached record is fetched into a temporary directory
-	 * (vitest's `cacheDir` is left alone) and, when the run ends, the plugin
-	 * logs how many of the files that ran it would have selected and which
-	 * failing test files it would have skipped. A green run still saves the record.
-	 */
+	/** @deprecated */
 	shadow?: boolean
 	/**
 	 * Dependencies the tracking cannot see (files a test reads through a child
