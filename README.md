@@ -1,5 +1,7 @@
 # @useblacksmith/vitest
 
+> **This repository has moved.** The source for `@useblacksmith/vitest` now lives in [`useblacksmith/js-test-plugins`](https://github.com/useblacksmith/js-test-plugins/tree/main/packages/vitest), alongside the Mocha and Jest plugins. Open issues and pull requests there. This repository holds the source up to version 0.6.5 and is no longer updated; the npm package name is unchanged.
+
 Speed up vitest execution by only running tests impacted by a change, with automatic caching when run on Blacksmith.
 
 > **Alpha.** The plugin is under active development; options and the cache format may change between releases.
